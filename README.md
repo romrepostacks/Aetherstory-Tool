@@ -2,7 +2,7 @@
 
 A personal AI story generator that remembers. Characters keep their history, every story is saved, and a shared "world bible" (lore, places, relationships, timeline) grows automatically after each story, so recurring characters build real continuity.
 
-Everything runs in your browser and is stored on your device. There is no server and no account; you bring your own AI key.
+Everything runs in your browser and is stored on your device. There is no server and no account; use the built-in on-device model or bring your own AI key.
 
 ## Open it
 
@@ -23,6 +23,8 @@ After each story the app asks the AI what changed and updates the world, the cha
 ## AI providers
 
 Any OpenAI-compatible `/chat/completions` endpoint works: OpenRouter, OpenAI, or a local model through Ollama (`http://localhost:11434/v1`) or LM Studio (`http://localhost:1234/v1`). For Ollama, start it with `OLLAMA_ORIGINS=*` so the browser may call it.
+
+**Built-in (no key):** the *Built-in* presets run [WebLLM](https://github.com/mlc-ai/web-llm) in the browser on your GPU. The default is Hermes 3 (Llama 3.2 3B), a small model tuned for creative writing and roleplay: ~2GB one-time download, then it works offline. *Built-in, lighter* uses Llama 3.2 1B (~1GB) for older phones. Needs WebGPU: Chrome/Edge on PC or Android, Safari on iOS 26+. Quality is below big hosted models; switch presets any time.
 
 ## Development
 

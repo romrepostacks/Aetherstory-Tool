@@ -40,8 +40,40 @@ async function save() {
 }
 
 // ---------- AI ----------
+// Built-in model: WebLLM runs the model on this device's GPU (WebGPU). Weights download once and are cached by the browser.
+const BUILTIN = 'builtin';
+const WEBLLM = 'https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.85/+esm';
+let local = null; // { model, ready: Promise<engine> }
+function builtinEngine(model) {
+  if (local && local.model === model) return local.ready;
+  if (!navigator.gpu) return Promise.reject(new Error('This browser has no WebGPU, so the built-in model cannot run here. Use Chrome/Edge on PC or Android, Safari on iOS 26+, or an API key.'));
+  const prev = local;
+  local = { model, ready: (async () => {
+    if (prev) await (await prev.ready.catch(() => null))?.unload();
+    const { CreateMLCEngine } = await import(WEBLLM);
+    // ponytail: 8k context fits a long story plus the world update; costs ~1GB extra GPU memory on the 3B model.
+    return CreateMLCEngine(model, { initProgressCallback: (p) => setStatus(p.text) }, { context_window_size: 8192 });
+  })() };
+  local.ready.catch(() => { local = null; });
+  return local.ready;
+}
+async function chatBuiltin(model, messages, temperature, { onToken, signal }) {
+  const engine = await builtinEngine(model);
+  const stop = () => engine.interruptGenerate();
+  signal && signal.addEventListener('abort', stop);
+  try {
+    let full = '';
+    for await (const c of await engine.chat.completions.create({ messages, temperature, stream: true })) {
+      const t = (c.choices[0] && c.choices[0].delta.content) || '';
+      if (t) { full += t; onToken && onToken(t); }
+    }
+    return full;
+  } finally { signal && signal.removeEventListener('abort', stop); }
+}
+
 async function chat(messages, { onToken, signal, stream = true } = {}) {
   const s = state.settings;
+  if (s.baseUrl === BUILTIN) return chatBuiltin(s.model, messages, Number(s.temperature) || 0.9, { onToken, signal });
   if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
   const headers = { 'Content-Type': 'application/json' };
   if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
@@ -152,12 +184,21 @@ async function quickstart(vibe) {
 }
 
 // ---------- views ----------
+const PRESETS = {
+  'Built-in (this device)': [BUILTIN, 'Hermes-3-Llama-3.2-3B-q4f16_1-MLC'],
+  'Built-in, lighter (older phones)': [BUILTIN, 'Llama-3.2-1B-Instruct-q4f16_1-MLC'],
+  'OpenRouter': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'],
+  'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'],
+};
 const VIEWS = {
   write() {
     const story = ui.currentId && state.stories.find((s) => s.id === ui.currentId);
     const nodes = [];
-    if (!state.settings.apiKey && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
-      nodes.push(h('div', { class: 'card', onclick: () => go('settings') }, h('h3', {}, 'First, connect an AI'), h('p', {}, 'Add your API key in Settings (OpenRouter, OpenAI, or a local model). Tap here.')));
+    if (!state.settings.apiKey && state.settings.baseUrl !== BUILTIN && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
+      const useBuiltin = () => { Object.assign(state.settings, { baseUrl: BUILTIN, model: PRESETS['Built-in (this device)'][1] }); save(); render(); };
+      nodes.push(h('div', { class: 'card' }, h('h3', {}, 'First, connect an AI'),
+        h('p', {}, 'Run a free storytelling model right on this device (one-time ~2GB download), or add an API key in Settings.'),
+        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: useBuiltin }, 'Use built-in model'), h('button', { class: 'btn ghost', onclick: () => go('settings') }, 'Add API key'))));
     }
     if (!state.characters.length) {
       const vibe = h('input', { placeholder: 'Optional: a one-line vibe, e.g. "rival witches in a rainy port city"' });
@@ -230,13 +271,12 @@ const VIEWS = {
 
   settings() {
     const s = state.settings;
-    const presets = { 'OpenRouter': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'], 'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'] };
     const bind = (key, el) => { el.value = s[key]; el.addEventListener('change', () => { s[key] = el.value.trim(); save(); }); return el; };
     const base = bind('baseUrl', h('input', { placeholder: 'https://openrouter.ai/api/v1' }));
     const model = bind('model', h('input', { placeholder: 'model id' }));
-    const preset = h('select', { onchange: (e) => { const p = presets[e.target.value]; if (!p) return; s.baseUrl = p[0]; s.model = p[1]; save(); render(); } },
-      h('option', { value: '' }, 'Pick a preset…'), Object.keys(presets).map((k) => h('option', { value: k }, k)));
-    const status = h('div', { class: 'status' });
+    const preset = h('select', { onchange: (e) => { const p = PRESETS[e.target.value]; if (!p) return; s.baseUrl = p[0]; s.model = p[1]; save(); render(); } },
+      h('option', { value: '' }, 'Pick a preset…'), Object.keys(PRESETS).map((k) => h('option', { value: k }, k)));
+    const status = h('div', { class: 'status', id: 'status' });
     const test = async () => {
       status.textContent = 'Testing…';
       try { status.textContent = 'Works! Reply: ' + (await chat([{ role: 'user', content: 'Say hello in five words.' }], { stream: false })); } catch (e) { status.textContent = e.message; }
@@ -259,7 +299,7 @@ const VIEWS = {
     const style = h('textarea', { placeholder: 'e.g. slow-burn romance, second person, lots of banter, avoid gore' });
     bind('style', style);
     return [h('h2', {}, 'AI provider'),
-      h('p', { class: 'muted' }, 'Any OpenAI-compatible API works. Your key is stored only on this device.'),
+      h('p', { class: 'muted' }, 'Any OpenAI-compatible API works. Your key is stored only on this device. Built-in presets run the AI on this device instead: no key, works offline after a one-time download, needs a browser with WebGPU.'),
       ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
       ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
       h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection')), status,
