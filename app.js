@@ -166,7 +166,7 @@ function setStatus(msg) { ui.status = msg; const el = document.getElementById('s
 async function generate(continueId) {
   if (ui.busy) return;
   const existing = continueId && state.stories.find((s) => s.id === continueId);
-  const story = existing || { id: A.uid(), title: 'Untitled story', summary: '', characterIds: [...ui.selected], premise: ui.premise, text: '', createdAt: Date.now() };
+  const story = existing || { id: A.uid(), title: 'Untitled story', summary: '', characterIds: ui.selected.length ? [...ui.selected] : state.characters.map((c) => c.id), premise: ui.premise, text: '', createdAt: Date.now() };
   const messages = A.buildStoryMessages(state, { characterIds: story.characterIds, premise: ui.premise, length: ui.length, continueStory: existing });
   if (!existing) state.stories.push(story);
   else story.text += '\n\n';
@@ -232,7 +232,7 @@ const VIEWS = {
         vibe, h('div', { class: 'row' }, h('button', { class: 'btn', disabled: ui.busy, onclick: () => quickstart(vibe.value.trim()) }, '✨ Create my world')),
         h('p', { class: 'muted' }, 'Or add your own characters in the Cast tab.'));
     } else {
-      nodes.push(h('h2', {}, 'Who is in this story?'),
+      nodes.push(h('h2', {}, 'Who is in this story?'), h('p', { class: 'muted' }, 'Pick some, or none to use the whole cast.'),
         h('div', { class: 'chips' }, state.characters.map((c) => h('button', {
           class: 'chip' + (ui.selected.includes(c.id) ? ' on' : ''),
           onclick: () => { ui.selected = ui.selected.includes(c.id) ? ui.selected.filter((x) => x !== c.id) : [...ui.selected, c.id]; render(); },
