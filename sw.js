@@ -1,5 +1,5 @@
 // Offline app shell. Bump VERSION when shipping changes so phones pick them up.
-const VERSION = 'aetherstory-v7';
+const VERSION = 'aetherstory-v8';
 const SHELL = ['./', 'index.html', 'app.js', 'lib.js', 'manifest.json', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));
@@ -20,7 +20,8 @@ self.addEventListener('fetch', (e) => {
   }
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   e.respondWith(
-    fetch(e.request).then((res) => {
+    // no-cache: revalidate with the server so Pages' 10-minute HTTP cache can't hide a new release.
+    fetch(e.request, { cache: 'no-cache' }).then((res) => {
       const copy = res.clone();
       caches.open(VERSION).then((c) => c.put(e.request, copy));
       return res;
