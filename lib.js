@@ -71,14 +71,17 @@
     ].filter(Boolean).join('\n');
 
     const words = LENGTHS[length] || LENGTHS.medium;
+    // Repeated in the user turn: small on-device models skim the long system prompt and invent their own cast.
+    const cast = chars.length ? ` The main characters are ${chars.map((c) => c.personality ? `${c.name} (${c.personality.split(/[.\n]/)[0].trim()})` : c.name).join(', ')}, ` +
+      'existing characters from the series bible. Use them by these exact names and stay true to their descriptions; do not replace them with new characters.' : '';
     let user;
     if (continueStory) {
-      user = `Here is the end of the story so far:\n\n"""${continueStory.text.slice(-6000)}"""\n\nContinue the story directly from where it stops for about ${words} words.` +
+      user = `Here is the end of the story so far:\n\n"""${continueStory.text.slice(-6000)}"""\n\nContinue the story directly from where it stops for about ${words} words.${cast}` +
         (premise ? ` Direction for this part: ${premise}` : '');
     } else {
       user = `Write a new story of about ${words} words` +
         (chars.length ? ` featuring ${chars.map((c) => c.name).join(', ')}` : '') + '. ' +
-        (premise ? `Premise: ${premise}` : 'Choose a fresh premise that fits the world and moves these characters forward.');
+        (premise ? `Premise: ${premise}` : 'Choose a fresh premise that fits the world and moves these characters forward.') + cast;
     }
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
   }

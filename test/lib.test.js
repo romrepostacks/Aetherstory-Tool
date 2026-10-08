@@ -20,6 +20,7 @@ test('story prompt carries world, characters and related past stories only', () 
   assert.match(sys.content, /The Wreck: Mira loses her ship/);
   assert.doesNotMatch(sys.content, /Unrelated/);
   assert.match(user.content, /Premise: a storm/);
+  assert.match(user.content, /main characters are Mira/);
 });
 
 test('continuation sends the story tail and excludes itself from history', () => {
