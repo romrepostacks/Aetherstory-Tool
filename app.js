@@ -147,7 +147,7 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { view: 'write', param: null, selected: [], premise: '', length: 'medium', busy: false, status: '', currentId: null, abort: null };
+const ui = { view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
@@ -166,8 +166,9 @@ function setStatus(msg) { ui.status = msg; const el = document.getElementById('s
 async function generate(continueId) {
   if (ui.busy) return;
   const existing = continueId && state.stories.find((s) => s.id === continueId);
-  const story = existing || { id: A.uid(), title: 'Untitled story', summary: '', characterIds: ui.selected.length ? [...ui.selected] : state.characters.map((c) => c.id), premise: ui.premise, text: '', createdAt: Date.now() };
-  const messages = A.buildStoryMessages(state, { characterIds: story.characterIds, premise: ui.premise, length: ui.length, continueStory: existing });
+  const cast = ui.selected.length ? [...ui.selected] : state.characters.map((c) => c.id);
+  const story = existing || { id: A.uid(), title: 'Untitled story', summary: '', characterIds: cast, pov: cast.includes(ui.pov) ? ui.pov : '', premise: ui.premise, text: '', createdAt: Date.now() };
+  const messages = A.buildStoryMessages(state, { characterIds: story.characterIds, premise: ui.premise, length: ui.length, continueStory: existing, pov: story.pov });
   if (!existing) state.stories.push(story);
   else story.text += '\n\n';
   ui.busy = true; ui.currentId = story.id; ui.abort = new AbortController();
@@ -241,7 +242,11 @@ const VIEWS = {
       premise.value = ui.premise;
       const length = h('select', { onchange: (e) => { ui.length = e.target.value; } },
         Object.entries(A.LENGTHS).map(([k, w]) => h('option', { value: k, selected: ui.length === k }, `${k[0].toUpperCase() + k.slice(1)} (~${w} words)`)));
-      nodes.push(...field('Premise or direction', premise), ...field('Length', length),
+      const castIds = ui.selected.length ? ui.selected : state.characters.map((c) => c.id);
+      const pov = h('select', { onchange: (e) => { ui.pov = e.target.value; } },
+        h('option', { value: '' }, 'Narrator (third person)'),
+        state.characters.filter((c) => castIds.includes(c.id)).map((c) => h('option', { value: c.id, selected: ui.pov === c.id }, `${c.name} (first person)`)));
+      nodes.push(...field('Premise or direction', premise), ...field('Length', length), ...field("Whose point of view?", pov),
         h('div', { class: 'row' },
           h('button', { class: 'btn', disabled: ui.busy, onclick: () => { ui.currentId = null; generate(); } }, '✨ Generate story'),
           ui.busy && h('button', { class: 'btn ghost', onclick: () => ui.abort && ui.abort.abort() }, 'Stop')));

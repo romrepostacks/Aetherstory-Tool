@@ -77,3 +77,32 @@ test('normalizeState fills gaps from partial imports', () => {
   assert.deepEqual(s.world.lore, []);
   assert.equal(s.settings.temperature, 0.9);
 });
+
+test('relationships: newest state per pair replaces the old one and reaches the story prompt', () => {
+  const s = seeded();
+  s.world.relationships = ['Mira & Kell: strangers', 'Kell & Toren: brothers'];
+  const story = { id: 'n', title: 'x', characterIds: ['a'], text: 't' };
+  const changes = A.applyWorldUpdate(s, story, { relationships: ['Kell and Mira: secretly in love', 'Kell & Toren: brothers'] });
+  assert.deepEqual(s.world.relationships, ['Kell & Toren: brothers', 'Kell and Mira: secretly in love']);
+  assert.ok(changes.includes('1 relationships'));
+  // older libraries kept every past state; only the latest is sent
+  s.world.relationships = ['Mira & Kell: strangers', 'Mira & Kell: lovers'];
+  const [sys, user] = A.buildStoryMessages(s, { characterIds: ['a'] });
+  assert.match(user.content, /relationships right now.*Mira & Kell: lovers/);
+  assert.doesNotMatch(sys.content + user.content, /strangers/);
+});
+
+test('point of view: first person for the chosen character', () => {
+  const [, user] = A.buildStoryMessages(seeded(), { characterIds: ['a'], pov: 'a' });
+  assert.match(user.content, /first person from Mira's point of view/);
+  const [, plain] = A.buildStoryMessages(seeded(), { characterIds: ['a'] });
+  assert.doesNotMatch(plain.content, /first person/);
+});
+
+test('relationships written in a character profile reach the story prompt', () => {
+  const s = A.emptyState();
+  s.characters.push({ id: 'a', name: 'Ana', background: 'Runs a bakery. Wife of Ben' }, { id: 'b', name: 'Ben', background: 'Ship captain. Husband of Ana.' });
+  const [, user] = A.buildStoryMessages(s, { characterIds: ['a', 'b'] });
+  assert.match(user.content, /Ana: Wife of Ben; Ben: Husband of Ana/);
+  assert.doesNotMatch(user.content, /bakery\./);
+});
