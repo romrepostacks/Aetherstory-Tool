@@ -9,7 +9,7 @@
       settings: {
         baseUrl: 'https://openrouter.ai/api/v1',
         apiKey: '',
-        model: 'sao10k/l3.3-euryale-70b',
+        model: 'venice/uncensored:free',
         temperature: 0.9,
         style: '',
         mature: false,

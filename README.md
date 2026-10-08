@@ -14,7 +14,7 @@ Data is per device and per browser. To move your library between PC and phone, u
 
 ## First run
 
-1. **Settings:** pick a preset (OpenRouter is easiest: one key, many models), paste your API key, tap *Test connection*. For adult fiction, use the Euryale preset and tick *Mature content (18+)*.
+1. **Settings:** pick a preset (OpenRouter is easiest: one key, many models), paste your API key, tap *Test connection*. For adult fiction, use the free Venice Uncensored preset (or paid Euryale 70B for better writing) and tick *Mature content (18+)*. OpenRouter's free models need an account but no credit, and have a daily request limit.
 2. **Write:** tap *Create my world* (optionally type a one-line vibe). The AI invents a world and a starting cast.
 3. Pick characters, tap *Generate story*. Leave the premise blank and the AI chooses one that fits your world.
 
