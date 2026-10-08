@@ -106,3 +106,10 @@ test('relationships written in a character profile reach the story prompt', () =
   assert.match(user.content, /Ana: Wife of Ben; Ben: Husband of Ana/);
   assert.doesNotMatch(user.content, /bakery\./);
 });
+
+test('mature setting adds the explicit-content instruction only when on', () => {
+  const s = seeded();
+  assert.doesNotMatch(A.buildStoryMessages(s, { characterIds: ['a'] })[0].content, /adult fiction/);
+  s.settings.mature = true;
+  assert.match(A.buildStoryMessages(s, { characterIds: ['a'] })[0].content, /adult fiction/);
+});
