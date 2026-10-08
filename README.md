@@ -24,7 +24,7 @@ After each story the app asks the AI what changed and updates the world, the cha
 
 Any OpenAI-compatible `/chat/completions` endpoint works: OpenRouter, OpenAI, or a local model through Ollama (`http://localhost:11434/v1`) or LM Studio (`http://localhost:1234/v1`). For Ollama, start it with `OLLAMA_ORIGINS=*` so the browser may call it.
 
-**Built-in (no key):** the *Built-in* presets run [WebLLM](https://github.com/mlc-ai/web-llm) in the browser on your GPU. The default is Hermes 3 (Llama 3.2 3B), a small model tuned for creative writing and roleplay: ~2GB one-time download, then it works offline. *Built-in, lighter* uses Llama 3.2 1B (~1GB) for older phones. Needs WebGPU: Chrome/Edge on PC or Android, Safari on iOS 26+. Quality is below big hosted models; switch presets any time.
+**Built-in (no key):** the *Built-in* presets run [WebLLM](https://github.com/mlc-ai/web-llm) in the browser on your GPU. The default is Hermes 3 (Llama 3.2 3B), a small model tuned for creative writing and roleplay: ~2GB one-time download, then it works offline. *Built-in, lighter* uses Llama 3.2 1B (~1GB) and is the default on phones. If a device runs out of memory, the app switches to the lighter model and says so. Needs WebGPU: Chrome/Edge on PC or Android, Safari on iOS 26+. Quality is below big hosted models; switch presets any time.
 
 ## Development
 
