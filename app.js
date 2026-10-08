@@ -211,7 +211,8 @@ async function quickstart(vibe) {
 const PRESETS = {
   'Built-in (this device)': [BUILTIN, 'Hermes-3-Llama-3.2-3B-q4f16_1-MLC'],
   'Built-in, lighter (phones)': [BUILTIN, LIGHT_MODEL],
-  'OpenRouter': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'],
+  'OpenRouter: Euryale 70B (uncensored storyteller)': ['https://openrouter.ai/api/v1', 'sao10k/l3.3-euryale-70b'],
+  'OpenRouter: GPT-4o mini': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'],
   'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'],
 };
 const VIEWS = {
@@ -333,7 +334,10 @@ const VIEWS = {
       ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
       ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
       h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection')), status,
-      h('h2', {}, 'Writing style'), ...field('Instructions applied to every story', style),
+      h('h2', {}, 'Writing style'),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
+      h('p', { class: 'muted' }, 'Hosted models like GPT-4o mini and the small built-in models often stay tame anyway; the Euryale preset follows this.'),
+      ...field('Instructions applied to every story', style),
       h('h2', {}, 'Library'),
       h('p', { class: 'muted' }, `${state.stories.length} stories, ${state.characters.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
       h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'), file)];
