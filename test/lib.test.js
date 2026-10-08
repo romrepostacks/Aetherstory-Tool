@@ -113,3 +113,8 @@ test('mature setting adds the explicit-content instruction only when on', () => 
   s.settings.mature = true;
   assert.match(A.buildStoryMessages(s, { characterIds: ['a'] })[0].content, /adult fiction/);
 });
+
+test('a retired model id saved in settings is swapped for its replacement', () => {
+  assert.equal(A.normalizeState({ settings: { model: 'venice/uncensored:free' } }).settings.model, A.emptyState().settings.model);
+  assert.equal(A.normalizeState({ settings: { model: 'my/model' } }).settings.model, 'my/model');
+});
