@@ -38,11 +38,28 @@
     return lines.join('\n');
   }
 
+  // "Mira & Kell: rivals" -> "kell&mira", so a newer entry for the same pair replaces the old one.
+  function pairKey(r) {
+    const i = r.indexOf(':');
+    return i < 0 ? null : r.slice(0, i).toLowerCase().split(/\s*(?:&|\band\b|,|\/)\s*/).map((s) => s.trim()).filter(Boolean).sort().join('&');
+  }
+  // Latest entry per pair wins (older libraries stored every past state).
+  function currentRelationships(list) {
+    const out = [];
+    for (const r of list || []) {
+      const k = pairKey(r);
+      const i = k ? out.findIndex((x) => pairKey(x) === k) : -1;
+      if (i >= 0) out.splice(i, 1);
+      out.push(r);
+    }
+    return out;
+  }
+
   function describeWorld(w) {
     const out = [`World: ${w.name || 'Unnamed'}`];
     if (w.overview) out.push(w.overview);
     for (const k of ['lore', 'places', 'relationships', 'timeline']) {
-      const items = (w[k] || []).slice(-40);
+      const items = (k === 'relationships' ? currentRelationships(w[k]) : w[k] || []).slice(-40);
       if (items.length) out.push(`${k[0].toUpperCase() + k.slice(1)}:\n- ` + items.join('\n- '));
     }
     return out.join('\n\n');
@@ -57,7 +74,7 @@
       .slice(-limit);
   }
 
-  function buildStoryMessages(state, { characterIds = [], premise = '', length = 'medium', continueStory = null }) {
+  function buildStoryMessages(state, { characterIds = [], premise = '', length = 'medium', continueStory = null, pov = '' }) {
     const chars = state.characters.filter((c) => characterIds.includes(c.id));
     const past = relatedStories(state, characterIds, continueStory && continueStory.id);
     const system = [
@@ -74,14 +91,27 @@
     // Repeated in the user turn: small on-device models skim the long system prompt and invent their own cast.
     const cast = chars.length ? ` The main characters are ${chars.map((c) => c.personality ? `${c.name} (${c.personality.split(/[.\n]/)[0].trim()})` : c.name).join(', ')}, ` +
       'existing characters from the series bible. Use them by these exact names and stay true to their descriptions; do not replace them with new characters.' : '';
+    // Same reason: their relationships as they stand now, so the story picks up where the last one left off.
+    const mentions = (text, c) => new RegExp(`\\b${c.name.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text);
+    const rels = currentRelationships(state.world.relationships).filter((r) => chars.some((c) => mentions(r.slice(0, Math.max(r.indexOf(':'), 0)), c)));
+    // Ties people wrote into a profile ("Wife of Ben") count too: any sentence naming another character in this story.
+    for (const c of chars) {
+      for (const line of `${c.background || ''}\n${c.personality || ''}`.split(/(?<=[.!?])\s+|\n/)) {
+        if (line.trim() && chars.some((o) => o !== c && mentions(line, o))) rels.push(`${c.name}: ${line.trim().replace(/[.!?]$/, '')}`);
+      }
+    }
+    const bonds = rels.length ? ` Their relationships right now (keep these consistent and let them evolve naturally): ${rels.join('; ')}.` : '';
+    const narrator = state.characters.find((c) => c.id === pov);
+    const voice = narrator ? ` Write it in first person from ${narrator.name}'s point of view: only what ${narrator.name} sees, thinks and feels.` : '';
+    const guide = cast + bonds + voice;
     let user;
     if (continueStory) {
-      user = `Here is the end of the story so far:\n\n"""${continueStory.text.slice(-6000)}"""\n\nContinue the story directly from where it stops for about ${words} words.${cast}` +
+      user = `Here is the end of the story so far:\n\n"""${continueStory.text.slice(-6000)}"""\n\nContinue the story directly from where it stops for about ${words} words.${guide}` +
         (premise ? ` Direction for this part: ${premise}` : '');
     } else {
       user = `Write a new story of about ${words} words` +
         (chars.length ? ` featuring ${chars.map((c) => c.name).join(', ')}` : '') + '. ' +
-        (premise ? `Premise: ${premise}` : 'Choose a fresh premise that fits the world and moves these characters forward.') + cast;
+        (premise ? `Premise: ${premise}` : 'Choose a fresh premise that fits the world and moves these characters forward.') + guide;
     }
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
   }
@@ -95,7 +125,8 @@
       ' "characterUpdates": [{"name": "known character", "development": "one sentence on what changed for them or what we learned"}],\n' +
       ' "newCharacters": [{"name": "", "appearance": "", "personality": "", "background": ""}],\n' +
       ' "lore": ["new world facts"], "places": ["Name: description"], "relationships": ["A & B: state of their relationship"], "timeline": ["event in one line"]}\n' +
-      'Only include NEW information not already in the bible. newCharacters only for named recurring-worthy characters not in the known list. Use empty arrays when nothing is new.';
+      'relationships: for every pair whose relationship changed or was revealed in this story, give its CURRENT state (it replaces the old entry), e.g. "Mira & Kell: wary allies after the storm, unspoken attraction".\n' +
+      'Otherwise only include NEW information not already in the bible. newCharacters only for named recurring-worthy characters not in the known list. Use empty arrays when nothing is new.';
     return [{ role: 'system', content: system }, { role: 'user', content: user }];
   }
 
@@ -146,6 +177,17 @@
     const seen = new Set(list.map((x) => x.toLowerCase()));
     for (const it of items) if (!seen.has(it.toLowerCase())) { list.push(it); seen.add(it.toLowerCase()); }
   }
+  // Like mergeList, but a pair's new state replaces its old one. Returns how many entries changed.
+  function mergeRelationships(list, items) {
+    let n = 0;
+    for (const it of items) {
+      if (list.some((x) => x.toLowerCase() === it.toLowerCase())) continue;
+      const k = pairKey(it);
+      for (let i = list.length - 1; i >= 0; i--) if (k && pairKey(list[i]) === k) list.splice(i, 1);
+      list.push(it); n++;
+    }
+    return n;
+  }
 
   // Mutates state. Returns a short human summary of what changed.
   function applyWorldUpdate(state, story, u) {
@@ -170,11 +212,13 @@
       if (!story.characterIds.includes(c.id)) story.characterIds.push(c.id);
       changes.push(`new character ${name}`);
     }
-    for (const k of ['lore', 'places', 'relationships', 'timeline']) {
+    for (const k of ['lore', 'places', 'timeline']) {
       const before = state.world[k].length;
       mergeList(state.world[k], strList(u[k]));
       if (state.world[k].length > before) changes.push(`${state.world[k].length - before} ${k}`);
     }
+    const rel = mergeRelationships(state.world.relationships, strList(u.relationships));
+    if (rel) changes.push(`${rel} relationships`);
     return changes;
   }
 
@@ -198,7 +242,7 @@
     return { tokens, rest, done };
   }
 
-  const api = { LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld };
+  const api = { LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
