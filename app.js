@@ -43,6 +43,10 @@ async function save() {
 // Built-in model: WebLLM runs the model on this device's GPU (WebGPU). Weights download once and are cached by the browser.
 const BUILTIN = 'builtin';
 const WEBLLM = 'https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.85/+esm';
+const LIGHT_MODEL = 'Llama-3.2-1B-Instruct-q4f16_1-MLC';
+// Set while the built-in model loads or writes. If the browser kills the tab (out of memory) it survives the reload, so boot can explain.
+const CRASH_KEY = 'aetherstory-builtin-running';
+const mark = (v) => { try { v ? localStorage.setItem(CRASH_KEY, v) : localStorage.removeItem(CRASH_KEY); } catch (e) { /* private mode */ } };
 let local = null; // { model, ready: Promise<engine> }
 function builtinEngine(model) {
   if (local && local.model === model) return local.ready;
@@ -50,25 +54,44 @@ function builtinEngine(model) {
   const prev = local;
   local = { model, ready: (async () => {
     if (prev) await (await prev.ready.catch(() => null))?.unload();
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error('The browser cannot use this device\'s GPU, so the built-in model cannot run here. Add an API key in Settings instead.');
+    // Many phones and older GPUs lack 16-bit shaders; the f32 build of the same model runs there.
+    const id = adapter.features.has('shader-f16') ? model : model.replace('q4f16', 'q4f32');
     const { CreateMLCEngine } = await import(WEBLLM);
     // ponytail: 8k context fits a long story plus the world update; costs ~1GB extra GPU memory on the 3B model.
-    return CreateMLCEngine(model, { initProgressCallback: (p) => setStatus(p.text) }, { context_window_size: 8192 });
+    return CreateMLCEngine(id, { initProgressCallback: (p) => setStatus(p.text) }, { context_window_size: 8192 });
   })() };
   local.ready.catch(() => { local = null; });
   return local.ready;
 }
 async function chatBuiltin(model, messages, temperature, { onToken, signal }) {
-  const engine = await builtinEngine(model);
-  const stop = () => engine.interruptGenerate();
-  signal && signal.addEventListener('abort', stop);
+  let stop;
+  mark(model);
   try {
+    const engine = await builtinEngine(model);
+    stop = () => engine.interruptGenerate();
+    signal && signal.addEventListener('abort', stop);
     let full = '';
     for await (const c of await engine.chat.completions.create({ messages, temperature, stream: true })) {
       const t = (c.choices[0] && c.choices[0].delta.content) || '';
       if (t) { full += t; onToken && onToken(t); }
     }
     return full;
-  } finally { signal && signal.removeEventListener('abort', stop); }
+  } catch (e) {
+    local = null; // a lost GPU device leaves the engine unusable; load fresh next time
+    if (!/lost|memory|OOM|allocat/i.test(e.message)) throw e;
+    throw new Error(builtinOutOfMemory(model));
+  } finally {
+    mark(null);
+    signal && stop && signal.removeEventListener('abort', stop);
+  }
+}
+// Out of GPU memory: drop to the lighter model so the next tap just works.
+function builtinOutOfMemory(model) {
+  if (model === LIGHT_MODEL) return 'This device ran out of memory running the built-in model. Add an API key in Settings to use a hosted model instead.';
+  state.settings.model = LIGHT_MODEL; save();
+  return 'This device ran out of memory for the full built-in model, so I switched to the lighter one. Tap Generate again.';
 }
 
 async function chat(messages, { onToken, signal, stream = true } = {}) {
@@ -186,7 +209,7 @@ async function quickstart(vibe) {
 // ---------- views ----------
 const PRESETS = {
   'Built-in (this device)': [BUILTIN, 'Hermes-3-Llama-3.2-3B-q4f16_1-MLC'],
-  'Built-in, lighter (older phones)': [BUILTIN, 'Llama-3.2-1B-Instruct-q4f16_1-MLC'],
+  'Built-in, lighter (phones)': [BUILTIN, LIGHT_MODEL],
   'OpenRouter': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'],
   'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'],
 };
@@ -195,9 +218,11 @@ const VIEWS = {
     const story = ui.currentId && state.stories.find((s) => s.id === ui.currentId);
     const nodes = [];
     if (!state.settings.apiKey && state.settings.baseUrl !== BUILTIN && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
-      const useBuiltin = () => { Object.assign(state.settings, { baseUrl: BUILTIN, model: PRESETS['Built-in (this device)'][1] }); save(); render(); };
+      // Phones get the lighter model by default: the 3B one needs ~3GB of GPU memory.
+      const phone = /Mobi|Android|iPhone|iPad/.test(navigator.userAgent);
+      const useBuiltin = () => { Object.assign(state.settings, { baseUrl: BUILTIN, model: phone ? LIGHT_MODEL : PRESETS['Built-in (this device)'][1] }); save(); render(); };
       nodes.push(h('div', { class: 'card' }, h('h3', {}, 'First, connect an AI'),
-        h('p', {}, 'Run a free storytelling model right on this device (one-time ~2GB download), or add an API key in Settings.'),
+        h('p', {}, 'Run a free storytelling model right on this device (one-time 1–2GB download), or add an API key in Settings.'),
         h('div', { class: 'row' }, h('button', { class: 'btn', onclick: useBuiltin }, 'Use built-in model'), h('button', { class: 'btn ghost', onclick: () => go('settings') }, 'Add API key'))));
     }
     if (!state.characters.length) {
@@ -362,6 +387,14 @@ function characterEditor(c) {
 // ---------- boot ----------
 (async () => {
   state = A.normalizeState(await load());
+  let crashed = null;
+  try { crashed = localStorage.getItem(CRASH_KEY); } catch (e) { /* private mode */ }
+  if (crashed) {
+    mark(null);
+    if (state.settings.baseUrl === BUILTIN) ui.status = 'The built-in model crashed the page last time. ' + builtinOutOfMemory(state.settings.model);
+  }
+  // Anything that slips past a try/catch still shows up instead of failing silently.
+  addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
   render();
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
