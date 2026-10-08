@@ -9,7 +9,7 @@
       settings: {
         baseUrl: 'https://openrouter.ai/api/v1',
         apiKey: '',
-        model: 'venice/uncensored:free',
+        model: 'nvidia/nemotron-3-ultra-550b-a55b:free',
         temperature: 0.9,
         style: '',
         mature: false,
@@ -20,12 +20,15 @@
     };
   }
 
+  // Models that stopped being offered under a saved id; swapped on load so old settings keep working.
+  const RETIRED = { 'venice/uncensored:free': 'nvidia/nemotron-3-ultra-550b-a55b:free' };
+
   // Fill in anything missing so old exports / partial imports still load.
   function normalizeState(s) {
     const base = emptyState();
     s = s || {};
     return {
-      settings: Object.assign(base.settings, s.settings),
+      settings: Object.assign(base.settings, s.settings, RETIRED[s.settings && s.settings.model] ? { model: RETIRED[s.settings.model] } : {}),
       characters: Array.isArray(s.characters) ? s.characters : [],
       stories: Array.isArray(s.stories) ? s.stories : [],
       world: Object.assign(base.world, s.world),
