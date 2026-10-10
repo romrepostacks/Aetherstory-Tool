@@ -124,3 +124,14 @@ test('a saved setup using the removed built-in model falls back to the free defa
   assert.equal(s.baseUrl, A.emptyState().settings.baseUrl);
   assert.equal(s.model, A.emptyState().settings.model);
 });
+
+test('backups round-trip with the device key and refuse any other key', async () => {
+  const key = A.newKey(), other = A.newKey();
+  const lib = seeded();
+  const file = await A.encryptBackup(lib, key);
+  assert.ok(A.isEncrypted(file));
+  assert.ok(!JSON.stringify(file).includes('Mira'));
+  assert.deepEqual(await A.decryptBackup(JSON.parse(JSON.stringify(file)), key + '\n'), lib);
+  await assert.rejects(A.decryptBackup(file, other));
+  assert.ok(!A.isEncrypted(lib));
+});

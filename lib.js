@@ -251,7 +251,29 @@
     return { tokens, rest, done };
   }
 
-  const api = { LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships };
+  // ---------- backup encryption: AES-256-GCM with a random per-device key (WebCrypto, so browser and node both run it) ----------
+  function toB64(buf) {
+    const u = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  const fromB64 = (s) => Uint8Array.from(atob(String(s).trim()), (c) => c.charCodeAt(0));
+  const newKey = () => toB64(crypto.getRandomValues(new Uint8Array(32)));
+  const cryptoKey = (key, use) => crypto.subtle.importKey('raw', fromB64(key), 'AES-GCM', false, [use]);
+  const isEncrypted = (f) => !!f && f.aetherstory === 'encrypted-v1';
+  async function encryptBackup(obj, key) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await cryptoKey(key, 'encrypt'), new TextEncoder().encode(JSON.stringify(obj)));
+    return { aetherstory: 'encrypted-v1', alg: 'AES-256-GCM', iv: toB64(iv), data: toB64(data) };
+  }
+  // Throws on a wrong key: GCM authenticates, so a bad key never yields garbage.
+  async function decryptBackup(file, key) {
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(file.iv) }, await cryptoKey(key, 'decrypt'), fromB64(file.data));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  const api = { newKey, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

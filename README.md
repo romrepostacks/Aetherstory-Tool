@@ -10,7 +10,7 @@ Everything runs in your browser and is stored on your device. There is no server
 
 **PC without hosting:** download the repo and double-click `index.html`.
 
-Data is per device and per browser. To move your library between PC and phone, use **Settings → Export backup** on one and **Import backup** on the other.
+Data is per device and per browser. To move your library between PC and phone, use **Settings → Export backup** on one and **Import backup** on the other. Backups are encrypted with AES-256-GCM using a random key unique to the device that made them (the API key is never included). To open a backup on a different device, also tap **Download key** on the original device and choose that `aetherstory-key.txt` when the new device asks for it. Keep the key file apart from your backups; without it, a backup can't be opened if the original browser's data is cleared.
 
 ## First run
 

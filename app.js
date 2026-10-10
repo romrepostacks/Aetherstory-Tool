@@ -12,28 +12,40 @@ function idb() {
     r.onerror = () => rej(r.error);
   });
 }
+// Reads `key`, or writes it when a value is given.
+async function kv(key, value) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const t = db.transaction('kv', value === undefined ? 'readonly' : 'readwrite');
+    const q = value === undefined ? t.objectStore('kv').get(key) : t.objectStore('kv').put(value, key);
+    t.oncomplete = () => res(q.result);
+    t.onerror = () => rej(t.error);
+  });
+}
 async function load() {
   try {
-    const db = await idb();
-    return await new Promise((res, rej) => {
-      const q = db.transaction('kv').objectStore('kv').get('state');
-      q.onsuccess = () => res(q.result);
-      q.onerror = () => rej(q.error);
-    });
+    return await kv('state');
   } catch (e) {
     return JSON.parse(localStorage.getItem(DB_KEY) || 'null');
   }
 }
+// This device's backup key, made on first use. Kept outside the library so it never ends up inside a backup.
+let devKey = null;
+const deviceKey = () => devKey || (devKey = (async () => {
+  try {
+    let k = await kv('deviceKey');
+    if (!k) await kv('deviceKey', k = A.newKey());
+    return k;
+  } catch (e) {
+    const k = localStorage.getItem(DB_KEY + '-key') || A.newKey();
+    localStorage.setItem(DB_KEY + '-key', k);
+    return k;
+  }
+})());
 async function save() {
   const data = JSON.parse(JSON.stringify(state));
   try {
-    const db = await idb();
-    await new Promise((res, rej) => {
-      const t = db.transaction('kv', 'readwrite');
-      t.objectStore('kv').put(data, 'state');
-      t.oncomplete = res;
-      t.onerror = () => rej(t.error);
-    });
+    await kv('state', data);
   } catch (e) {
     try { localStorage.setItem(DB_KEY, JSON.stringify(data)); } catch (e2) { alert('Could not save: ' + e2.message + '\nExport your library from Settings.'); }
   }
@@ -92,7 +104,7 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { advanced: false, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
+const ui = { advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
@@ -283,20 +295,46 @@ const VIEWS = {
       status.textContent = 'Testing…';
       try { status.textContent = 'Works! Reply: ' + (await chat([{ role: 'user', content: 'Say hello in five words.' }], { stream: false })); } catch (e) { status.textContent = e.message; }
     };
+    const restore = async (raw) => {
+      const data = A.normalizeState(raw);
+      if (!confirm(`Replace your library with this backup (${data.stories.length} stories, ${data.characters.length} characters)?`)) return;
+      if (!data.settings.apiKey) data.settings.apiKey = s.apiKey; // backups don't carry the API key
+      data.settings.ageOk = true;
+      state = data; ui.pendingImport = null; await save(); render();
+    };
     const file = h('input', { type: 'file', accept: 'application/json,.json', style: 'display:none', onchange: async (e) => {
-      const f = e.target.files[0]; if (!f) return;
+      const f = e.target.files[0]; e.target.value = ''; if (!f) return;
       try {
-        const data = A.normalizeState(JSON.parse(await f.text()));
-        if (!confirm(`Replace your library with this backup (${data.stories.length} stories, ${data.characters.length} characters)?`)) return;
-        if (!data.settings.apiKey) data.settings.apiKey = s.apiKey; // backups don't carry the key
-        state = data; await save(); render();
+        const j = JSON.parse(await f.text());
+        if (!A.isEncrypted(j)) return await restore(j); // older, unencrypted backups still load
+        let plain;
+        try { plain = await A.decryptBackup(j, await deviceKey()); } catch (err) { ui.pendingImport = j; render(); return; }
+        await restore(plain);
       } catch (err) { alert('Could not read that file: ' + err.message); }
     } });
-    const exportLib = () => {
+    const download = (text, name) => {
+      const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' })), download: name });
+      document.body.append(a); a.click(); a.remove();
+    };
+    const exportLib = async () => {
       const data = JSON.parse(JSON.stringify(state));
       data.settings.apiKey = '';
-      const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })), download: `aetherstory-${new Date().toISOString().slice(0, 10)}.json` });
-      document.body.append(a); a.click(); a.remove();
+      download(JSON.stringify(await A.encryptBackup(data, await deviceKey())), `aetherstory-${new Date().toISOString().slice(0, 10)}.json`);
+    };
+    // A backup from another device: ask for that device's key file (or the pasted key).
+    const unlockBox = () => {
+      const msg = h('div', { class: 'status' });
+      const unlock = async (key) => {
+        let plain;
+        try { plain = await A.decryptBackup(ui.pendingImport, key); } catch (err) { msg.textContent = 'That key does not open this backup. Use the key file from the device that made it.'; return; }
+        await restore(plain);
+      };
+      const keyFile = h('input', { type: 'file', accept: '.txt,text/plain', onchange: async (e) => { const f = e.target.files[0]; if (f) unlock(await f.text()); } });
+      const pasted = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Or paste the key' });
+      return h('div', { class: 'card setup' }, h('h3', {}, 'This backup was made on another device'),
+        h('p', {}, 'Choose the key file you downloaded on that device (aetherstory-key.txt) to unlock it.'),
+        ...field('Key file', keyFile), pasted,
+        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => unlock(pasted.value) }, 'Unlock'), h('button', { class: 'btn ghost', onclick: () => { ui.pendingImport = null; render(); } }, 'Cancel')), msg);
     };
     const style = h('textarea', { placeholder: 'e.g. slow-burn romance, second person, lots of banter, avoid gore' });
     bind('style', style);
@@ -317,7 +355,10 @@ const VIEWS = {
       ...field('Instructions applied to every story', style),
       h('h2', {}, 'Library'),
       h('p', { class: 'muted' }, `${state.stories.length} stories, ${state.characters.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
-      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'), file)];
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
+        h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file),
+      h('p', { class: 'muted' }, 'Backups are encrypted (AES-256) with a key unique to this device. To open one on another device, or after clearing this browser, you also need this device\'s key file: download it once and keep it somewhere separate from your backups.'),
+      ui.pendingImport && unlockBox()];
   },
 };
 
