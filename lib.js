@@ -12,7 +12,8 @@
         model: 'nvidia/nemotron-3-ultra-550b-a55b:free',
         temperature: 0.9,
         style: '',
-        mature: false,
+        mature: true,
+        ageOk: false,
       },
       characters: [],
       stories: [],
@@ -22,13 +23,16 @@
 
   // Models that stopped being offered under a saved id; swapped on load so old settings keep working.
   const RETIRED = { 'venice/uncensored:free': 'nvidia/nemotron-3-ultra-550b-a55b:free' };
+  const BUILTIN = 'builtin'; // the removed on-device model; saved setups fall back to the default
 
   // Fill in anything missing so old exports / partial imports still load.
   function normalizeState(s) {
     const base = emptyState();
     s = s || {};
     return {
-      settings: Object.assign(base.settings, s.settings, RETIRED[s.settings && s.settings.model] ? { model: RETIRED[s.settings.model] } : {}),
+      settings: Object.assign(base.settings, s.settings,
+        RETIRED[s.settings && s.settings.model] ? { model: RETIRED[s.settings.model] } : {},
+        s.settings && s.settings.baseUrl === BUILTIN ? { baseUrl: base.settings.baseUrl, model: base.settings.model } : {}),
       characters: Array.isArray(s.characters) ? s.characters : [],
       stories: Array.isArray(s.stories) ? s.stories : [],
       world: Object.assign(base.world, s.world),

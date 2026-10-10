@@ -40,63 +40,8 @@ async function save() {
 }
 
 // ---------- AI ----------
-// Built-in model: WebLLM runs the model on this device's GPU (WebGPU). Weights download once and are cached by the browser.
-const BUILTIN = 'builtin';
-const WEBLLM = 'https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.85/+esm';
-const LIGHT_MODEL = 'Llama-3.2-1B-Instruct-q4f16_1-MLC';
-// Set while the built-in model loads or writes. If the browser kills the tab (out of memory) it survives the reload, so boot can explain.
-const CRASH_KEY = 'aetherstory-builtin-running';
-const mark = (v) => { try { v ? localStorage.setItem(CRASH_KEY, v) : localStorage.removeItem(CRASH_KEY); } catch (e) { /* private mode */ } };
-let local = null; // { model, ready: Promise<engine> }
-function builtinEngine(model) {
-  if (local && local.model === model) return local.ready;
-  if (!navigator.gpu) return Promise.reject(new Error('This browser has no WebGPU, so the built-in model cannot run here. Use Chrome/Edge on PC or Android, Safari on iOS 26+, or an API key.'));
-  const prev = local;
-  local = { model, ready: (async () => {
-    if (prev) await (await prev.ready.catch(() => null))?.unload();
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error('The browser cannot use this device\'s GPU, so the built-in model cannot run here. Add an API key in Settings instead.');
-    // Many phones and older GPUs lack 16-bit shaders; the f32 build of the same model runs there.
-    const id = adapter.features.has('shader-f16') ? model : model.replace('q4f16', 'q4f32');
-    const { CreateMLCEngine } = await import(WEBLLM);
-    // ponytail: 8k context fits a long story plus the world update; costs ~1GB extra GPU memory on the 3B model.
-    return CreateMLCEngine(id, { initProgressCallback: (p) => setStatus(p.text) }, { context_window_size: 8192 });
-  })() };
-  local.ready.catch(() => { local = null; });
-  return local.ready;
-}
-async function chatBuiltin(model, messages, temperature, { onToken, signal }) {
-  let stop;
-  mark(model);
-  try {
-    const engine = await builtinEngine(model);
-    stop = () => engine.interruptGenerate();
-    signal && signal.addEventListener('abort', stop);
-    let full = '';
-    for await (const c of await engine.chat.completions.create({ messages, temperature, stream: true })) {
-      const t = (c.choices[0] && c.choices[0].delta.content) || '';
-      if (t) { full += t; onToken && onToken(t); }
-    }
-    return full;
-  } catch (e) {
-    local = null; // a lost GPU device leaves the engine unusable; load fresh next time
-    if (!/lost|memory|OOM|allocat/i.test(e.message)) throw e;
-    throw new Error(builtinOutOfMemory(model));
-  } finally {
-    mark(null);
-    signal && stop && signal.removeEventListener('abort', stop);
-  }
-}
-// Out of GPU memory: drop to the lighter model so the next tap just works.
-function builtinOutOfMemory(model) {
-  if (model === LIGHT_MODEL) return 'This device ran out of memory running the built-in model. Add an API key in Settings to use a hosted model instead.';
-  state.settings.model = LIGHT_MODEL; save();
-  return 'This device ran out of memory for the full built-in model, so I switched to the lighter one. Tap Generate again.';
-}
-
 async function chat(messages, { onToken, signal, stream = true } = {}) {
   const s = state.settings;
-  if (s.baseUrl === BUILTIN) return chatBuiltin(s.model, messages, Number(s.temperature) || 0.9, { onToken, signal });
   if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
   const headers = { 'Content-Type': 'application/json' };
   if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
@@ -155,8 +100,10 @@ function go(view, param = null) { ui.view = view; ui.param = param; render(); wi
 function render() {
   document.getElementById('worldName').textContent = state.world.name;
   const nav = document.getElementById('nav');
-  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: ui.view === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
   const view = document.getElementById('view');
+  nav.hidden = !state.settings.ageOk;
+  if (!state.settings.ageOk) return view.replaceChildren(...ageGate());
+  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: ui.view === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
   view.replaceChildren(...[VIEWS[ui.view]()].flat(Infinity).filter((n) => n && n.nodeType));
 }
 
@@ -209,32 +156,47 @@ async function quickstart(vibe) {
 
 // ---------- views ----------
 const PRESETS = {
-  'Built-in (this device)': [BUILTIN, 'Hermes-3-Llama-3.2-3B-q4f16_1-MLC'],
-  'Built-in, lighter (phones)': [BUILTIN, LIGHT_MODEL],
-  'OpenRouter: Nemotron 3 Ultra (free)': ['https://openrouter.ai/api/v1', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
+  'OpenRouter: Nemotron 3 Ultra (free, default)': ['https://openrouter.ai/api/v1', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
   'OpenRouter: Gemma 4 31B (free)': ['https://openrouter.ai/api/v1', 'google/gemma-4-31b-it:free'],
   'OpenRouter: Venice Uncensored (paid, under 1¢ a story)': ['https://openrouter.ai/api/v1', 'cognitivecomputations/dolphin-mistral-24b-venice-edition'],
   'OpenRouter: Euryale 70B (paid, best)': ['https://openrouter.ai/api/v1', 'sao10k/l3.3-euryale-70b'],
-  'OpenRouter: GPT-4o mini': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'],
   'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'],
 };
-// Phones get the lighter model by default: the 3B one needs ~3GB of GPU memory.
-const builtinModel = () => (/Mobi|Android|iPhone|iPad/.test(navigator.userAgent) ? LIGHT_MODEL : PRESETS['Built-in (this device)'][1]);
-// The plain-language picker on Settings; everything else lives under Advanced.
-const CHOICES = [
-  ['Free (recommended)', 'Good stories at no cost. Needs a free OpenRouter key.', PRESETS['OpenRouter: Nemotron 3 Ultra (free)']],
-  ['Best quality', 'Richest writing and follows the 18+ setting reliably. About a cent per story on OpenRouter.', PRESETS['OpenRouter: Euryale 70B (paid, best)']],
-  ['No account', 'Runs on this device, works offline. One-time 1–2GB download; simpler stories.', [BUILTIN]],
-];
+// Guided setup for someone who has never made an API key: three steps, one paste, then straight to writing.
+function keySetup() {
+  const key = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your key here' });
+  const status = h('div', { class: 'status' });
+  const start = async () => {
+    const k = key.value.trim();
+    if (!k) { status.textContent = 'Paste your key first.'; return; }
+    const d = A.emptyState().settings;
+    Object.assign(state.settings, { apiKey: k, baseUrl: d.baseUrl, model: d.model });
+    await save();
+    status.textContent = 'Checking your key…';
+    try { await chat([{ role: 'user', content: 'Say hi.' }], { stream: false }); } catch (e) { status.textContent = 'That key did not work. Check you copied all of it. (' + e.message + ')'; return; }
+    ui.status = 'You are all set!'; go('write');
+  };
+  return [h('ol', { class: 'steps' },
+    h('li', {}, 'Open ', h('a', { href: 'https://openrouter.ai/keys', target: '_blank', rel: 'noopener' }, 'openrouter.ai/keys'), ' and sign in. Google sign-in works, and no card is needed.'),
+    h('li', {}, 'Tap ', h('b', {}, 'Create API Key'), ', name it anything (like "stories"), and tap ', h('b', {}, 'Copy'), '.'),
+    h('li', {}, 'Come back here, paste it below, and tap Start.')),
+    key, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: start }, 'Start')), status];
+}
+function ageGate() {
+  return [h('h2', {}, 'Adults only (18+)'),
+    h('p', {}, 'Aetherstory writes fiction that can include explicit sexual content, violence and other mature themes. You must be at least 18 years old, or the age of majority where you live, to use it.'),
+    h('p', { class: 'muted' }, 'By entering, you confirm you meet this age requirement and choose to view this kind of content.'),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn', onclick: () => { state.settings.ageOk = true; save(); render(); } }, 'I am 18 or older'),
+      h('button', { class: 'btn ghost', onclick: () => { location.href = 'https://www.google.com'; } }, 'Leave'))];
+}
 const VIEWS = {
   write() {
     const story = ui.currentId && state.stories.find((s) => s.id === ui.currentId);
     const nodes = [];
-    if (!state.settings.apiKey && state.settings.baseUrl !== BUILTIN && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
-      const useBuiltin = () => { Object.assign(state.settings, { baseUrl: BUILTIN, model: builtinModel() }); save(); render(); };
-      nodes.push(h('div', { class: 'card' }, h('h3', {}, 'First, connect an AI'),
-        h('p', {}, 'Run a free storytelling model right on this device (one-time 1–2GB download), or use a free online AI (needs a free sign-up).'),
-        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: useBuiltin }, 'Use built-in model'), h('button', { class: 'btn ghost', onclick: () => go('settings') }, 'Set up free online AI'))));
+    if (!state.settings.apiKey && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
+      nodes.push(h('div', { class: 'card setup' }, h('h3', {}, 'First, get your free AI key'),
+        h('p', {}, 'It takes about two minutes and costs nothing. You only do this once.'), keySetup()));
     }
     if (!state.characters.length) {
       const vibe = h('input', { placeholder: 'Optional: a one-line vibe, e.g. "rival witches in a rainy port city"' });
@@ -338,23 +300,20 @@ const VIEWS = {
     };
     const style = h('textarea', { placeholder: 'e.g. slow-burn romance, second person, lots of banter, avoid gore' });
     bind('style', style);
-    const isOn = ([url, id]) => s.baseUrl === url && (url === BUILTIN || s.model === id);
-    const choose = ([url, id]) => { s.baseUrl = url; s.model = url === BUILTIN ? builtinModel() : id; save(); render(); };
-    const openrouter = s.baseUrl.includes('openrouter.ai');
-    return [h('h2', {}, 'Which AI writes your stories?'),
-      CHOICES.map(([title, blurb, p]) => h('div', { class: 'card' + (isOn(p) ? ' on' : ''), onclick: () => choose(p) }, h('h3', {}, (isOn(p) ? '✓ ' : '') + title), h('p', {}, blurb))),
-      !CHOICES.some(([, , p]) => isOn(p)) && h('p', { class: 'muted' }, `Using a custom setup (${s.model}). See Advanced.`),
-      s.baseUrl !== BUILTIN && [
-        ...field(openrouter ? 'OpenRouter key' : 'API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your key here' }))),
-        openrouter && h('p', { class: 'muted' }, 'No key yet? Sign up free at ', h('a', { href: 'https://openrouter.ai/keys', target: '_blank', rel: 'noopener' }, 'openrouter.ai/keys'), ', tap Create Key, and paste it above. It stays on this device.')],
-      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test it')), status,
-      h('details', { open: ui.advanced, ontoggle: (e) => { ui.advanced = e.target.open; } }, h('summary', {}, 'Advanced'),
-        h('p', { class: 'muted' }, 'Any OpenAI-compatible API works. Built-in presets run the AI on this device and need a browser with WebGPU.'),
-        ...field('Preset', preset), ...field('Base URL', base), ...field('Model', model),
-        ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 })))),
+    const isDefault = s.model === A.emptyState().settings.model;
+    return [h('h2', {}, 'AI setup'),
+      s.apiKey ? [h('p', { class: 'muted' }, '✓ Key saved. ' + (isDefault ? 'Stories are written by the free default AI (Nemotron).' : `Using ${s.model} (see Advanced mode).`)),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test it'))]
+        : keySetup(),
+      h('details', { open: ui.advanced, ontoggle: (e) => { ui.advanced = e.target.open; } }, h('summary', {}, 'Advanced mode'),
+        h('p', { class: 'muted' }, 'Pick another model or any OpenAI-compatible service. Your key is stored only on this device.'),
+        ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
+        ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection'))),
+      status,
       h('h2', {}, 'Writing style'),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
-      h('p', { class: 'muted' }, 'Hosted models like GPT-4o mini and the small built-in models often stay tame anyway; free models may also soften scenes. Venice and Euryale (paid) follow it reliably.'),
+      h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
       h('h2', {}, 'Library'),
       h('p', { class: 'muted' }, `${state.stories.length} stories, ${state.characters.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
@@ -414,12 +373,6 @@ function characterEditor(c) {
 // ---------- boot ----------
 (async () => {
   state = A.normalizeState(await load());
-  let crashed = null;
-  try { crashed = localStorage.getItem(CRASH_KEY); } catch (e) { /* private mode */ }
-  if (crashed) {
-    mark(null);
-    if (state.settings.baseUrl === BUILTIN) ui.status = 'The built-in model crashed the page last time. ' + builtinOutOfMemory(state.settings.model);
-  }
   // Anything that slips past a try/catch still shows up instead of failing silently.
   addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
   render();

@@ -2,7 +2,7 @@
 
 A personal AI story generator that remembers. Characters keep their history, every story is saved, and a shared "world bible" (lore, places, relationships, timeline) grows automatically after each story, so recurring characters build real continuity.
 
-Everything runs in your browser and is stored on your device. There is no server and no account; use the built-in on-device model or bring your own AI key.
+Everything runs in your browser and is stored on your device. There is no server and no app account; the AI runs through a free OpenRouter key you paste in once.
 
 ## Open it
 
@@ -14,7 +14,7 @@ Data is per device and per browser. To move your library between PC and phone, u
 
 ## First run
 
-1. **Settings:** pick a preset (OpenRouter is easiest: one key, many models), paste your API key, tap *Test connection*. For adult fiction, tick *Mature content (18+)* and pick a model: the free Nemotron 3 Ultra or Gemma 4 presets cost nothing (about 25 stories a day, and they may soften explicit scenes), while Venice Uncensored (under 1 cent a story) and Euryale 70B are paid but reliably uncensored. OpenRouter's free models need an account but no credit; you may need to allow free-model providers in its privacy settings.
+1. **First launch:** confirm you are 18+, then follow the three on-screen steps to make a free OpenRouter key and paste it. That sets up the free Nemotron 3 Ultra model (about 25 stories a day; may soften some explicit scenes). Mature content is on by default. *Settings → Advanced mode* keeps the presets, base URL, model and temperature: Gemma 4 (free), Venice Uncensored (under 1 cent a story) and Euryale 70B (paid, reliably uncensored), or a local Ollama/LM Studio. You may need to allow free-model providers in OpenRouter's privacy settings.
 2. **Write:** tap *Create my world* (optionally type a one-line vibe). The AI invents a world and a starting cast.
 3. Pick characters, tap *Generate story*. Leave the premise blank and the AI chooses one that fits your world.
 
@@ -23,8 +23,6 @@ After each story the app asks the AI what changed and updates the world, the cha
 ## AI providers
 
 Any OpenAI-compatible `/chat/completions` endpoint works: OpenRouter, OpenAI, or a local model through Ollama (`http://localhost:11434/v1`) or LM Studio (`http://localhost:1234/v1`). For Ollama, start it with `OLLAMA_ORIGINS=*` so the browser may call it.
-
-**Built-in (no key):** the *Built-in* presets run [WebLLM](https://github.com/mlc-ai/web-llm) in the browser on your GPU. The default is Hermes 3 (Llama 3.2 3B), a small model tuned for creative writing and roleplay: ~2GB one-time download, then it works offline. *Built-in, lighter* uses Llama 3.2 1B (~1GB) and is the default on phones. If a device runs out of memory, the app switches to the lighter model and says so. Needs WebGPU: Chrome/Edge on PC or Android, Safari on iOS 26+. Quality is below big hosted models; switch presets any time.
 
 ## Development
 
