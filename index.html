@@ -27,6 +27,7 @@
   header small { color: var(--muted); }
   main { max-width: 760px; margin: 0 auto; padding: 0 16px 24px; }
   nav { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--panel); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); z-index: 5; }
+  nav[hidden] { display: none; }
   nav button { flex: 1; background: none; border: 0; color: var(--muted); padding: 10px 0 12px; font: 0.8rem system-ui, sans-serif; cursor: pointer; }
   nav button span { display: block; font-size: 1.3rem; }
   nav button.on { color: var(--accent); }

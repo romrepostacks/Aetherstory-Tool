@@ -8,9 +8,10 @@ This file is the living record of how the app protects its users. **Every change
 
 | Data | Where | Protection |
 |---|---|---|
-| Stories, characters, world | IndexedDB in the user's browser (localStorage if IndexedDB is unavailable) | Browser same-origin isolation. **Not encrypted at rest yet** (see Roadmap). |
-| AI API key | Same record as the library | Never written into backups. Same at-rest caveat. |
-| Device backup key (AES-256) | Its own IndexedDB record, outside the library | Never written into backups. Downloaded only when the user taps *Download key*. |
+| Stories, characters, world | IndexedDB in the user's browser (localStorage if IndexedDB is unavailable) | Browser same-origin isolation. With **App lock** on, sealed with AES-256-GCM under a passcode-derived key. |
+| AI API key | Same record as the library | Never written into backups. Sealed with the library when App lock is on. |
+| Device backup key (AES-256) | Its own IndexedDB record, outside the library | Never written into backups. Downloaded only when the user taps *Download key*. Sealed under the passcode when App lock is on. |
+| App lock passcode and derived key | Nowhere. The key lives only in memory while the app is unlocked. | Only a random salt is stored. |
 | Backup files | Wherever the user saves them | AES-256-GCM with the device key. Tampering or a wrong key is detected and refused. |
 | Age confirmation | In the library settings | Not sensitive. |
 
@@ -26,6 +27,7 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 
 ## Protections in place
 
+- **App lock (encryption at rest):** an optional passcode (minimum 6 characters) derives an AES-256-GCM key with PBKDF2-SHA256 (600,000 iterations, random 128-bit salt). While the lock is on, the library, API key and device backup key are stored only in sealed form, with a fresh IV on every save. Someone who opens the app, or copies the browser's files, gets ciphertext. The app locks after 5 minutes in the background or on *Lock now*, which reloads the page and drops the key and library from memory. A forgotten passcode can't be recovered, so the lock screen offers *erase everything* and restoring from a backup.
 - **Encrypted backups:** AES-256-GCM through WebCrypto, with a random 256-bit key per device and a fresh 96-bit IV per export. A backup from another device needs that device's key file (`aetherstory-key.txt`). The API key is never exported.
 - **Imports can't hijack the AI key:** importing a backup never changes this device's AI address, key, model or Private mode. A crafted backup therefore can't send this device's key to a server the attacker controls.
 - **Content Security Policy:** scripts run only from the app's own origin. No inline scripts, no `eval`, no plugins, no forms.
@@ -43,7 +45,7 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 | # | Severity | Finding | Status |
 |---|---|---|---|
 | 1 | High | Story text goes to the AI provider, and free providers may keep or train on it. | **Mitigated:** Private mode added as an opt-in switch. The owner chose on 2026-10-10 to keep it off by default so the free model keeps working. |
-| 2 | High | The library and API key are stored unencrypted on the device. Anyone who can open the browser, or copy its profile, can read every story. | **Open:** app lock (see Roadmap). |
+| 2 | High | The library and API key are stored unencrypted on the device. Anyone who can open the browser, or copy its profile, can read every story. | **Fixed** on 2026-10-10 with App lock (opt-in). Without the lock, data is still plain at rest. |
 | 3 | High | The repository is public. An earlier PR description once contained real character details. It was redacted, but GitHub keeps description edit history, and commits that were overwritten stay reachable by their ID. | **Owner action needed:** see the owner checklist below. A check of the current files, every commit on every branch, and all PR descriptions and comments found no personal details today. |
 | 4 | High | Supply chain: anyone who can push to `main` ships code to every user's device on the next load, and that code could read the library. | **Owner action needed:** 2FA and branch protection. Workflow actions are pinned to major tags rather than commit SHAs. |
 | 5 | Medium | Importing a crafted backup could change the AI address while keeping this device's key, sending the key to an attacker's server. | **Fixed** |
@@ -53,12 +55,13 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 | 9 | Low | Plain-text backups were the only format. | **Fixed:** exports are always encrypted. Old plain backups can still be imported. |
 | 10 | Low | Referrer header and search indexing. | **Fixed** |
 | 11 | Info | XSS review: rendering uses `createElement`/text nodes only, and there is no `innerHTML`, `eval` or dynamic script loading. | OK |
-| 12 | Info | The device backup key sits in the same browser storage as the library. It protects backup files, not the device itself. | By design: the app lock will wrap it. |
+| 12 | Info | The device backup key sits in the same browser storage as the library. It protects backup files, not the device itself. | **Fixed:** sealed under the passcode when App lock is on. |
+| 13 | Info | A short passcode can be guessed offline by someone who copies the sealed data: PBKDF2 slows each guess but can't save a 6-digit PIN. | Documented. The app asks for 6+ characters and suggests longer. |
 
 ## Roadmap (next protections, in priority order)
 
-1. **App lock with a passcode.** Encrypt the whole library and API key at rest with AES-256-GCM, using a key derived from a passcode (PBKDF2-SHA256, 600k iterations). The app opens to a lock screen. A forgotten passcode means the data is gone unless a backup and key file exist. This closes findings 2 and 12.
-2. **Auto-lock** after a few minutes in the background.
+1. **Turn App lock on by default** during first-run setup, once it has been used for a while.
+2. **Change passcode** without turning the lock off and on.
 3. **Pin GitHub Actions to commit SHAs** and enable branch protection on `main`.
 4. **Self-host or reconsider public hosting.** A private repository removes all public history, but Pages on a private repo needs a paid GitHub plan.
 
@@ -72,6 +75,7 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 
 ## User guidance (shown in the app where it matters)
 
+- Turn on App lock with a long passcode, a short sentence if possible.
 - Download your device key once and keep it apart from your backups.
 - Use a device passcode, because anyone holding an unlocked phone can open the app.
 - Turn on Private mode if you'd rather a story fail than reach a provider that might keep it.

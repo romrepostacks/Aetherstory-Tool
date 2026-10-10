@@ -22,33 +22,37 @@ async function kv(key, value) {
     t.onerror = () => rej(t.error);
   });
 }
-async function load() {
-  try {
-    return await kv('state');
-  } catch (e) {
-    return JSON.parse(localStorage.getItem(DB_KEY) || 'null');
+const lsName = (key) => (key === 'state' ? DB_KEY : DB_KEY + '-key');
+async function get(key) {
+  try { return await kv(key); } catch (e) {
+    const v = localStorage.getItem(lsName(key));
+    try { return JSON.parse(v); } catch (e2) { return v; } // older fallback stored the device key unquoted
   }
 }
+// App lock: while it's on, every record is sealed with a key derived from the passcode. Only kept in memory, never stored.
+let lockKey = null, lockSalt = null;
+async function put(key, value) {
+  const rec = lockKey ? await A.seal(value, lockKey, lockSalt) : value;
+  try { await kv(key, rec); } catch (e) { localStorage.setItem(lsName(key), JSON.stringify(rec)); }
+}
+const unsealed = async (rec) => (A.isLocked(rec) ? A.unseal(rec, lockKey) : rec);
 // This device's backup key, made on first use. Kept outside the library so it never ends up inside a backup.
 let devKey = null;
 const deviceKey = () => devKey || (devKey = (async () => {
-  try {
-    let k = await kv('deviceKey');
-    if (!k) await kv('deviceKey', k = A.newKey());
-    return k;
-  } catch (e) {
-    const k = localStorage.getItem(DB_KEY + '-key') || A.newKey();
-    localStorage.setItem(DB_KEY + '-key', k);
-    return k;
-  }
+  let k = await unsealed(await get('deviceKey'));
+  if (!k) await put('deviceKey', k = A.newKey());
+  return k;
 })());
 async function save() {
-  const data = JSON.parse(JSON.stringify(state));
-  try {
-    await kv('state', data);
-  } catch (e) {
-    try { localStorage.setItem(DB_KEY, JSON.stringify(data)); } catch (e2) { alert('Could not save: ' + e2.message + '\nExport your library from Settings.'); }
-  }
+  try { await put('state', JSON.parse(JSON.stringify(state))); } catch (e) { alert('Could not save: ' + e.message + '\nExport your library from Settings.'); }
+}
+// Re-seal both records under the new lock (or none).
+async function setLock(passcode) {
+  const dk = await deviceKey();
+  lockSalt = passcode ? A.newSalt() : null;
+  lockKey = passcode ? await A.deriveKey(passcode, lockSalt) : null;
+  await put('deviceKey', dk);
+  await save();
 }
 
 // ---------- AI ----------
@@ -109,7 +113,7 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
+const ui = { locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
@@ -118,7 +122,8 @@ function render() {
   document.getElementById('worldName').textContent = state.world.name;
   const nav = document.getElementById('nav');
   const view = document.getElementById('view');
-  nav.hidden = !state.settings.ageOk;
+  nav.hidden = !!ui.locked || !state.settings.ageOk;
+  if (ui.locked) return view.replaceChildren(...lockScreen());
   if (!state.settings.ageOk) return view.replaceChildren(...ageGate());
   nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: ui.view === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
   view.replaceChildren(...[VIEWS[ui.view]()].flat(Infinity).filter((n) => n && n.nodeType));
@@ -198,6 +203,22 @@ function keySetup() {
     h('li', {}, 'Tap ', h('b', {}, 'Create API Key'), ', name it anything (like "stories"), and tap ', h('b', {}, 'Copy'), '.'),
     h('li', {}, 'Come back here, paste it below, and tap Start.')),
     key, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: start }, 'Start')), status];
+}
+function lockScreen() {
+  const pass = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Passcode' });
+  const msg = h('div', { class: 'status' });
+  const unlock = async () => {
+    msg.textContent = 'Unlocking…';
+    const key = await A.deriveKey(pass.value, ui.locked.salt);
+    let data;
+    try { data = await A.unseal(ui.locked, key); } catch (e) { msg.textContent = 'Wrong passcode.'; pass.value = ''; return; }
+    lockKey = key; lockSalt = ui.locked.salt; state = A.normalizeState(data); ui.locked = null; render();
+  };
+  pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
+  setTimeout(() => pass.focus());
+  return [h('h2', {}, '🔒 Aetherstory is locked'), pass,
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: unlock }, 'Unlock')), msg,
+    h('p', { class: 'muted' }, 'Forgot your passcode? Your stories can\'t be recovered without it. You can ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); eraseAll(); } }, 'erase everything'), ' and start over, then import a backup.')];
 }
 function ageGate() {
   return [h('h2', {}, 'Adults only (18+)'),
@@ -361,6 +382,11 @@ const VIEWS = {
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
       h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
+      h('h2', {}, 'App lock'),
+      lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),
+          h('button', { class: 'btn ghost', onclick: async () => { if (!confirm('Turn off the lock? Your library will be stored unencrypted on this device.')) return; await setLock(null); render(); } }, 'Turn off'))]
+        : lockSetup(),
       h('h2', {}, 'Library'),
       h('p', { class: 'muted' }, `${state.stories.length} stories, ${state.characters.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
       h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
@@ -420,6 +446,21 @@ function characterEditor(c) {
     appearsIn.length > 0 && [h('h2', {}, 'Appears in'), appearsIn.map((s) => h('div', { class: 'card', onclick: () => go('stories', s.id) }, h('h3', {}, s.title), h('p', {}, s.summary || '')))]];
 }
 
+function lockSetup() {
+  const a = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'New passcode (at least 6 characters)' });
+  const b = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Type it again' });
+  const msg = h('div', { class: 'status' });
+  const turnOn = async () => {
+    if (a.value.length < 6) { msg.textContent = 'Use at least 6 characters. Longer is safer.'; return; }
+    if (a.value !== b.value) { msg.textContent = 'The two passcodes don\'t match.'; return; }
+    if (!confirm('If you forget this passcode, your stories cannot be recovered. Keep a backup and your key file somewhere safe. Turn on the lock?')) return;
+    msg.textContent = 'Encrypting…';
+    await setLock(a.value); render();
+  };
+  return [h('p', { class: 'muted' }, 'Encrypt your stories, characters, world and API key on this device with a passcode. Anyone opening the app, or copying the browser\'s files, sees only scrambled data.'),
+    a, b, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: turnOn }, 'Turn on lock')), msg];
+}
+
 // Wipes every trace on this device: library, device key, API key, offline cache. Nothing is kept anywhere else.
 async function eraseAll() {
   if (!confirm('Erase all stories, characters, your world, your API key and this device\'s backup key? This cannot be undone. Backups made with this device\'s key can only be opened with a key file you downloaded.')) return;
@@ -432,9 +473,16 @@ async function eraseAll() {
 
 // ---------- boot ----------
 (async () => {
-  state = A.normalizeState(await load());
+  const saved = await get('state');
+  if (A.isLocked(saved)) ui.locked = saved; else state = A.normalizeState(saved);
   // Blur the screen when the app is hidden, so the app switcher preview doesn't show a story. Best effort: browsers decide when they snapshot.
-  document.addEventListener('visibilitychange', () => document.body.classList.toggle('hide', document.hidden));
+  // With the lock on, coming back after 5 minutes reloads, which drops the key and the library from memory.
+  let hiddenAt = 0;
+  document.addEventListener('visibilitychange', () => {
+    document.body.classList.toggle('hide', document.hidden);
+    if (document.hidden) hiddenAt = Date.now();
+    else if (lockKey && Date.now() - hiddenAt > 5 * 60e3) location.reload();
+  });
   // Anything that slips past a try/catch still shows up instead of failing silently.
   addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
   render();

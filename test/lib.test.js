@@ -135,3 +135,13 @@ test('backups round-trip with the device key and refuse any other key', async ()
   await assert.rejects(A.decryptBackup(file, other));
   assert.ok(!A.isEncrypted(lib));
 });
+
+test('the app lock seals the library under a passcode and refuses a wrong one', async () => {
+  const salt = A.newSalt();
+  const lib = seeded();
+  const rec = await A.seal(lib, await A.deriveKey('correct horse', salt), salt);
+  assert.ok(A.isLocked(rec) && !A.isLocked(lib));
+  assert.ok(!JSON.stringify(rec).includes('Mira'));
+  assert.deepEqual(await A.unseal(rec, await A.deriveKey('correct horse', rec.salt)), lib);
+  await assert.rejects(A.unseal(rec, await A.deriveKey('wrong horse', rec.salt)));
+});
