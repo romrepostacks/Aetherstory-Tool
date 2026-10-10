@@ -337,12 +337,30 @@
     return rec;
   }
 
+  // OpenRouter can answer 200 with {"error": ...} instead of choices when the model's provider fails or is busy.
+  function providerError(d) {
+    const e = d && d.error;
+    if (!e) return null;
+    const code = Number(e.code) || 0;
+    const err = new Error(`The AI provider returned an error${code ? ` (${code})` : ''}: ${e.message || JSON.stringify(e).slice(0, 300)}`);
+    err.retry = code === 429 || code >= 500;
+    return err;
+  }
+  // The text of a non-streamed reply, or a readable error.
+  function replyText(d) {
+    const err = providerError(d);
+    if (err) throw err;
+    const m = d && d.choices && d.choices[0] && d.choices[0].message;
+    if (!m || typeof m.content !== 'string') { const e = new Error('The AI sent back an empty reply. Try again.'); e.retry = true; throw e; }
+    return m.content;
+  }
+
   // Split an SSE buffer into complete `data:` payloads plus the unfinished tail.
   function parseSSE(buffer) {
     const lines = buffer.split('\n');
     const rest = lines.pop();
     const tokens = [];
-    let done = false;
+    let done = false, error = null;
     for (const line of lines) {
       const t = line.trim();
       if (!t.startsWith('data:')) continue;
@@ -350,11 +368,12 @@
       if (data === '[DONE]') { done = true; continue; }
       try {
         const d = JSON.parse(data);
+        error = error || providerError(d);
         const tok = d.choices && d.choices[0] && ((d.choices[0].delta && d.choices[0].delta.content) || (d.choices[0].message && d.choices[0].message.content));
         if (tok) tokens.push(tok);
       } catch (e) { /* keep-alive or partial junk */ }
     }
-    return { tokens, rest, done };
+    return { tokens, rest, done, error };
   }
 
   // ---------- encryption: AES-256-GCM via WebCrypto, so browser and node both run it ----------
@@ -391,7 +410,7 @@
   const seal = async (obj, key, salt) => ({ aetherstory: 'locked-v1', alg: 'AES-256-GCM, PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt, ...(await encryptWith(obj, key)) });
   const unseal = decryptWith;
 
-  const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships,
+  const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, replyText, describeWorld, currentRelationships,
     buildReviseSheetMessages, buildReviseStoryMessages, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
