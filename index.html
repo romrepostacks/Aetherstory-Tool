@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14111f">
+<!-- Only this site's own code runs; AI calls may go to any https endpoint (or a local server) the user sets. See SECURITY.md. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Aetherstory</title>
@@ -23,6 +27,7 @@
   header small { color: var(--muted); }
   main { max-width: 760px; margin: 0 auto; padding: 0 16px 24px; }
   nav { position: fixed; bottom: 0; left: 0; right: 0; display: flex; background: var(--panel); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); z-index: 5; }
+  nav[hidden] { display: none; }
   nav button { flex: 1; background: none; border: 0; color: var(--muted); padding: 10px 0 12px; font: 0.8rem system-ui, sans-serif; cursor: pointer; }
   nav button span { display: block; font-size: 1.3rem; }
   nav button.on { color: var(--accent); }
@@ -40,11 +45,17 @@
   .chip.on { border-color: var(--accent); background: #3a2b55; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin: 10px 0; cursor: pointer; }
   .card h3 { margin: 0 0 4px; font-size: 1.05rem; }
+    a { color: var(--accent); }
+  summary { cursor: pointer; color: var(--muted); font: 0.95rem system-ui, sans-serif; margin-top: 18px; }
+  .card.setup { cursor: default; }
+  ol.steps { margin: 10px 0; padding-left: 22px; font: 0.95rem/1.5 system-ui, sans-serif; }
+  ol.steps li { margin: 6px 0; }
   .card p { margin: 0; color: var(--muted); font: 0.9rem/1.4 system-ui, sans-serif; }
   .prose { white-space: pre-wrap; line-height: 1.7; font-size: 1.08rem; }
   .muted { color: var(--muted); font: 0.9rem system-ui, sans-serif; }
   .status { color: var(--accent); font: 0.9rem system-ui, sans-serif; min-height: 1.2em; margin-top: 10px; }
   .empty { text-align: center; color: var(--muted); padding: 30px 10px; font: 0.95rem/1.5 system-ui, sans-serif; }
+  body.hide main { filter: blur(24px); }
   ul.dev { margin: 6px 0; padding-left: 18px; color: var(--muted); font: 0.9rem/1.5 system-ui, sans-serif; }
 </style>
 </head>

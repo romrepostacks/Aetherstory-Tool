@@ -12,99 +12,65 @@ function idb() {
     r.onerror = () => rej(r.error);
   });
 }
-async function load() {
-  try {
-    const db = await idb();
-    return await new Promise((res, rej) => {
-      const q = db.transaction('kv').objectStore('kv').get('state');
-      q.onsuccess = () => res(q.result);
-      q.onerror = () => rej(q.error);
-    });
-  } catch (e) {
-    return JSON.parse(localStorage.getItem(DB_KEY) || 'null');
+// Reads `key`, or writes it when a value is given.
+async function kv(key, value) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const t = db.transaction('kv', value === undefined ? 'readonly' : 'readwrite');
+    const q = value === undefined ? t.objectStore('kv').get(key) : t.objectStore('kv').put(value, key);
+    t.oncomplete = () => res(q.result);
+    t.onerror = () => rej(t.error);
+  });
+}
+const lsName = (key) => (key === 'state' ? DB_KEY : DB_KEY + '-key');
+async function get(key) {
+  try { return await kv(key); } catch (e) {
+    const v = localStorage.getItem(lsName(key));
+    try { return JSON.parse(v); } catch (e2) { return v; } // older fallback stored the device key unquoted
   }
 }
+// App lock: while it's on, every record is sealed with a key derived from the passcode. Only kept in memory, never stored.
+let lockKey = null, lockSalt = null;
+async function put(key, value) {
+  const rec = lockKey ? await A.seal(value, lockKey, lockSalt) : value;
+  try { await kv(key, rec); } catch (e) { localStorage.setItem(lsName(key), JSON.stringify(rec)); }
+}
+const unsealed = async (rec) => (A.isLocked(rec) ? A.unseal(rec, lockKey) : rec);
+// This device's backup key, made on first use. Kept outside the library so it never ends up inside a backup.
+let devKey = null;
+const deviceKey = () => devKey || (devKey = (async () => {
+  let k = await unsealed(await get('deviceKey'));
+  if (!k) await put('deviceKey', k = A.newKey());
+  return k;
+})());
 async function save() {
-  const data = JSON.parse(JSON.stringify(state));
-  try {
-    const db = await idb();
-    await new Promise((res, rej) => {
-      const t = db.transaction('kv', 'readwrite');
-      t.objectStore('kv').put(data, 'state');
-      t.oncomplete = res;
-      t.onerror = () => rej(t.error);
-    });
-  } catch (e) {
-    try { localStorage.setItem(DB_KEY, JSON.stringify(data)); } catch (e2) { alert('Could not save: ' + e2.message + '\nExport your library from Settings.'); }
-  }
+  try { await put('state', JSON.parse(JSON.stringify(state))); } catch (e) { alert('Could not save: ' + e.message + '\nExport your library from Settings.'); }
+}
+// Re-seal both records under the new lock (or none).
+async function setLock(passcode) {
+  const dk = await deviceKey();
+  lockSalt = passcode ? A.newSalt() : null;
+  lockKey = passcode ? await A.deriveKey(passcode, lockSalt) : null;
+  await put('deviceKey', dk);
+  await save();
 }
 
 // ---------- AI ----------
-// Built-in model: WebLLM runs the model on this device's GPU (WebGPU). Weights download once and are cached by the browser.
-const BUILTIN = 'builtin';
-const WEBLLM = 'https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.85/+esm';
-const LIGHT_MODEL = 'Llama-3.2-1B-Instruct-q4f16_1-MLC';
-// Set while the built-in model loads or writes. If the browser kills the tab (out of memory) it survives the reload, so boot can explain.
-const CRASH_KEY = 'aetherstory-builtin-running';
-const mark = (v) => { try { v ? localStorage.setItem(CRASH_KEY, v) : localStorage.removeItem(CRASH_KEY); } catch (e) { /* private mode */ } };
-let local = null; // { model, ready: Promise<engine> }
-function builtinEngine(model) {
-  if (local && local.model === model) return local.ready;
-  if (!navigator.gpu) return Promise.reject(new Error('This browser has no WebGPU, so the built-in model cannot run here. Use Chrome/Edge on PC or Android, Safari on iOS 26+, or an API key.'));
-  const prev = local;
-  local = { model, ready: (async () => {
-    if (prev) await (await prev.ready.catch(() => null))?.unload();
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error('The browser cannot use this device\'s GPU, so the built-in model cannot run here. Add an API key in Settings instead.');
-    // Many phones and older GPUs lack 16-bit shaders; the f32 build of the same model runs there.
-    const id = adapter.features.has('shader-f16') ? model : model.replace('q4f16', 'q4f32');
-    const { CreateMLCEngine } = await import(WEBLLM);
-    // ponytail: 8k context fits a long story plus the world update; costs ~1GB extra GPU memory on the 3B model.
-    return CreateMLCEngine(id, { initProgressCallback: (p) => setStatus(p.text) }, { context_window_size: 8192 });
-  })() };
-  local.ready.catch(() => { local = null; });
-  return local.ready;
-}
-async function chatBuiltin(model, messages, temperature, { onToken, signal }) {
-  let stop;
-  mark(model);
-  try {
-    const engine = await builtinEngine(model);
-    stop = () => engine.interruptGenerate();
-    signal && signal.addEventListener('abort', stop);
-    let full = '';
-    for await (const c of await engine.chat.completions.create({ messages, temperature, stream: true })) {
-      const t = (c.choices[0] && c.choices[0].delta.content) || '';
-      if (t) { full += t; onToken && onToken(t); }
-    }
-    return full;
-  } catch (e) {
-    local = null; // a lost GPU device leaves the engine unusable; load fresh next time
-    if (!/lost|memory|OOM|allocat/i.test(e.message)) throw e;
-    throw new Error(builtinOutOfMemory(model));
-  } finally {
-    mark(null);
-    signal && stop && signal.removeEventListener('abort', stop);
-  }
-}
-// Out of GPU memory: drop to the lighter model so the next tap just works.
-function builtinOutOfMemory(model) {
-  if (model === LIGHT_MODEL) return 'This device ran out of memory running the built-in model. Add an API key in Settings to use a hosted model instead.';
-  state.settings.model = LIGHT_MODEL; save();
-  return 'This device ran out of memory for the full built-in model, so I switched to the lighter one. Tap Generate again.';
-}
-
 async function chat(messages, { onToken, signal, stream = true } = {}) {
   const s = state.settings;
-  if (s.baseUrl === BUILTIN) return chatBuiltin(s.model, messages, Number(s.temperature) || 0.9, { onToken, signal });
   if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
   const headers = { 'Content-Type': 'application/json' };
   if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
   const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
     method: 'POST', headers, signal,
-    body: JSON.stringify({ model: s.model, messages, temperature: Number(s.temperature) || 0.9, stream }),
+    // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
+    body: JSON.stringify({ model: s.model, messages, temperature: Number(s.temperature) || 0.9, stream,
+      ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
   });
-  if (!res.ok) throw new Error(`AI request failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    const msg = `AI request failed (${res.status}): ${(await res.text()).slice(0, 300)}`;
+    throw new Error(s.privateOnly && res.status === 404 ? msg + '\nPrivate mode is on and no private provider serves this model. Pick a paid model in Advanced mode, or turn Private mode off.' : msg);
+  }
   if (!stream || !(res.headers.get('content-type') || '').includes('event-stream')) {
     const d = await res.json();
     const text = d.choices[0].message.content;
@@ -147,7 +113,7 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
+const ui = { locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
@@ -155,8 +121,11 @@ function go(view, param = null) { ui.view = view; ui.param = param; render(); wi
 function render() {
   document.getElementById('worldName').textContent = state.world.name;
   const nav = document.getElementById('nav');
-  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: ui.view === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
   const view = document.getElementById('view');
+  nav.hidden = !!ui.locked || !state.settings.ageOk;
+  if (ui.locked) return view.replaceChildren(...lockScreen());
+  if (!state.settings.ageOk) return view.replaceChildren(...ageGate());
+  nav.replaceChildren(...TABS.map(([v, icon, label]) => h('button', { class: ui.view === v ? 'on' : '', onclick: () => go(v) }, h('span', {}, icon), label)));
   view.replaceChildren(...[VIEWS[ui.view]()].flat(Infinity).filter((n) => n && n.nodeType));
 }
 
@@ -209,26 +178,63 @@ async function quickstart(vibe) {
 
 // ---------- views ----------
 const PRESETS = {
-  'Built-in (this device)': [BUILTIN, 'Hermes-3-Llama-3.2-3B-q4f16_1-MLC'],
-  'Built-in, lighter (phones)': [BUILTIN, LIGHT_MODEL],
-  'OpenRouter: Nemotron 3 Ultra (free)': ['https://openrouter.ai/api/v1', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
+  'OpenRouter: Nemotron 3 Ultra (free, default)': ['https://openrouter.ai/api/v1', 'nvidia/nemotron-3-ultra-550b-a55b:free'],
   'OpenRouter: Gemma 4 31B (free)': ['https://openrouter.ai/api/v1', 'google/gemma-4-31b-it:free'],
   'OpenRouter: Venice Uncensored (paid, under 1¢ a story)': ['https://openrouter.ai/api/v1', 'cognitivecomputations/dolphin-mistral-24b-venice-edition'],
   'OpenRouter: Euryale 70B (paid, best)': ['https://openrouter.ai/api/v1', 'sao10k/l3.3-euryale-70b'],
-  'OpenRouter: GPT-4o mini': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'],
   'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'],
 };
+// Guided setup for someone who has never made an API key: three steps, one paste, then straight to writing.
+function keySetup() {
+  const key = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your key here' });
+  const status = h('div', { class: 'status' });
+  const start = async () => {
+    const k = key.value.trim();
+    if (!k) { status.textContent = 'Paste your key first.'; return; }
+    const d = A.emptyState().settings;
+    Object.assign(state.settings, { apiKey: k, baseUrl: d.baseUrl, model: d.model });
+    await save();
+    status.textContent = 'Checking your key…';
+    try { await chat([{ role: 'user', content: 'Say hi.' }], { stream: false }); } catch (e) { status.textContent = 'That key did not work. Check you copied all of it. (' + e.message + ')'; return; }
+    ui.status = 'You are all set!'; go('write');
+  };
+  return [h('ol', { class: 'steps' },
+    h('li', {}, 'Open ', h('a', { href: 'https://openrouter.ai/keys', target: '_blank', rel: 'noopener' }, 'openrouter.ai/keys'), ' and sign in. Google sign-in works, and no card is needed.'),
+    h('li', {}, 'Tap ', h('b', {}, 'Create API Key'), ', name it anything (like "stories"), and tap ', h('b', {}, 'Copy'), '.'),
+    h('li', {}, 'Come back here, paste it below, and tap Start.')),
+    key, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: start }, 'Start')), status];
+}
+function lockScreen() {
+  const pass = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Passcode' });
+  const msg = h('div', { class: 'status' });
+  const unlock = async () => {
+    msg.textContent = 'Unlocking…';
+    const key = await A.deriveKey(pass.value, ui.locked.salt);
+    let data;
+    try { data = await A.unseal(ui.locked, key); } catch (e) { msg.textContent = 'Wrong passcode.'; pass.value = ''; return; }
+    lockKey = key; lockSalt = ui.locked.salt; state = A.normalizeState(data); ui.locked = null; render();
+  };
+  pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') unlock(); });
+  setTimeout(() => pass.focus());
+  return [h('h2', {}, '🔒 Aetherstory is locked'), pass,
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: unlock }, 'Unlock')), msg,
+    h('p', { class: 'muted' }, 'Forgot your passcode? Your stories can\'t be recovered without it. You can ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); eraseAll(); } }, 'erase everything'), ' and start over, then import a backup.')];
+}
+function ageGate() {
+  return [h('h2', {}, 'Adults only (18+)'),
+    h('p', {}, 'Aetherstory writes fiction that can include explicit sexual content, violence and other mature themes. You must be at least 18 years old, or the age of majority where you live, to use it.'),
+    h('p', { class: 'muted' }, 'By entering, you confirm you meet this age requirement and choose to view this kind of content.'),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn', onclick: () => { state.settings.ageOk = true; save(); render(); } }, 'I am 18 or older'),
+      h('button', { class: 'btn ghost', onclick: () => { location.href = 'https://www.google.com'; } }, 'Leave'))];
+}
 const VIEWS = {
   write() {
     const story = ui.currentId && state.stories.find((s) => s.id === ui.currentId);
     const nodes = [];
-    if (!state.settings.apiKey && state.settings.baseUrl !== BUILTIN && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
-      // Phones get the lighter model by default: the 3B one needs ~3GB of GPU memory.
-      const phone = /Mobi|Android|iPhone|iPad/.test(navigator.userAgent);
-      const useBuiltin = () => { Object.assign(state.settings, { baseUrl: BUILTIN, model: phone ? LIGHT_MODEL : PRESETS['Built-in (this device)'][1] }); save(); render(); };
-      nodes.push(h('div', { class: 'card' }, h('h3', {}, 'First, connect an AI'),
-        h('p', {}, 'Run a free storytelling model right on this device (one-time 1–2GB download), or add an API key in Settings.'),
-        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: useBuiltin }, 'Use built-in model'), h('button', { class: 'btn ghost', onclick: () => go('settings') }, 'Add API key'))));
+    if (!state.settings.apiKey && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
+      nodes.push(h('div', { class: 'card setup' }, h('h3', {}, 'First, get your free AI key'),
+        h('p', {}, 'It takes about two minutes and costs nothing. You only do this once.'), keySetup()));
     }
     if (!state.characters.length) {
       const vibe = h('input', { placeholder: 'Optional: a one-line vibe, e.g. "rival witches in a rainy port city"' });
@@ -315,35 +321,79 @@ const VIEWS = {
       status.textContent = 'Testing…';
       try { status.textContent = 'Works! Reply: ' + (await chat([{ role: 'user', content: 'Say hello in five words.' }], { stream: false })); } catch (e) { status.textContent = e.message; }
     };
+    const restore = async (raw) => {
+      const data = A.normalizeState(raw);
+      if (!confirm(`Replace your library with this backup (${data.stories.length} stories, ${data.characters.length} characters)?`)) return;
+      // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly']) data.settings[k] = s[k];
+      data.settings.ageOk = true;
+      state = data; ui.pendingImport = null; await save(); render();
+    };
     const file = h('input', { type: 'file', accept: 'application/json,.json', style: 'display:none', onchange: async (e) => {
-      const f = e.target.files[0]; if (!f) return;
+      const f = e.target.files[0]; e.target.value = ''; if (!f) return;
       try {
-        const data = A.normalizeState(JSON.parse(await f.text()));
-        if (!confirm(`Replace your library with this backup (${data.stories.length} stories, ${data.characters.length} characters)?`)) return;
-        if (!data.settings.apiKey) data.settings.apiKey = s.apiKey; // backups don't carry the key
-        state = data; await save(); render();
+        const j = JSON.parse(await f.text());
+        if (!A.isEncrypted(j)) return await restore(j); // older, unencrypted backups still load
+        let plain;
+        try { plain = await A.decryptBackup(j, await deviceKey()); } catch (err) { ui.pendingImport = j; render(); return; }
+        await restore(plain);
       } catch (err) { alert('Could not read that file: ' + err.message); }
     } });
-    const exportLib = () => {
+    const download = (text, name) => {
+      const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' })), download: name });
+      document.body.append(a); a.click(); a.remove();
+    };
+    const exportLib = async () => {
       const data = JSON.parse(JSON.stringify(state));
       data.settings.apiKey = '';
-      const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })), download: `aetherstory-${new Date().toISOString().slice(0, 10)}.json` });
-      document.body.append(a); a.click(); a.remove();
+      download(JSON.stringify(await A.encryptBackup(data, await deviceKey())), `aetherstory-${new Date().toISOString().slice(0, 10)}.json`);
+    };
+    // A backup from another device: ask for that device's key file (or the pasted key).
+    const unlockBox = () => {
+      const msg = h('div', { class: 'status' });
+      const unlock = async (key) => {
+        let plain;
+        try { plain = await A.decryptBackup(ui.pendingImport, key); } catch (err) { msg.textContent = 'That key does not open this backup. Use the key file from the device that made it.'; return; }
+        await restore(plain);
+      };
+      const keyFile = h('input', { type: 'file', accept: '.txt,text/plain', onchange: async (e) => { const f = e.target.files[0]; if (f) unlock(await f.text()); } });
+      const pasted = h('input', { type: 'password', autocomplete: 'off', placeholder: 'Or paste the key' });
+      return h('div', { class: 'card setup' }, h('h3', {}, 'This backup was made on another device'),
+        h('p', {}, 'Choose the key file you downloaded on that device (aetherstory-key.txt) to unlock it.'),
+        ...field('Key file', keyFile), pasted,
+        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => unlock(pasted.value) }, 'Unlock'), h('button', { class: 'btn ghost', onclick: () => { ui.pendingImport = null; render(); } }, 'Cancel')), msg);
     };
     const style = h('textarea', { placeholder: 'e.g. slow-burn romance, second person, lots of banter, avoid gore' });
     bind('style', style);
-    return [h('h2', {}, 'AI provider'),
-      h('p', { class: 'muted' }, 'Any OpenAI-compatible API works. Your key is stored only on this device. Built-in presets run the AI on this device instead: no key, works offline after a one-time download, needs a browser with WebGPU.'),
-      ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
-      ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
-      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection')), status,
+    const isDefault = s.model === A.emptyState().settings.model;
+    return [h('h2', {}, 'AI setup'),
+      s.apiKey ? [h('p', { class: 'muted' }, '✓ Key saved. ' + (isDefault ? 'Stories are written by the free default AI (Nemotron).' : `Using ${s.model} (see Advanced mode).`)),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test it'))]
+        : keySetup(),
+      h('details', { open: ui.advanced, ontoggle: (e) => { ui.advanced = e.target.open; } }, h('summary', {}, 'Advanced mode'),
+        h('p', { class: 'muted' }, 'Pick another model or any OpenAI-compatible service. Your key is stored only on this device.'),
+        ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
+        ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection'))),
+      status,
       h('h2', {}, 'Writing style'),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.privateOnly, onchange: (e) => { s.privateOnly = e.target.checked; save(); }, style: 'width:auto' }), ' Private mode: only use AI providers that do not store or train on my stories'),
+      h('p', { class: 'muted' }, 'Your stories are sent to the AI to be written. Free models are often run by providers that may keep prompts; Private mode blocks those, so free models may stop working.'),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
-      h('p', { class: 'muted' }, 'Hosted models like GPT-4o mini and the small built-in models often stay tame anyway; free models may also soften scenes. Venice and Euryale (paid) follow it reliably.'),
+      h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
+      h('h2', {}, 'App lock'),
+      lockKey ? [h('p', { class: 'muted' }, '✓ On. Your stories, characters, world and API key are encrypted on this device. The app locks itself after 5 minutes in the background.'),
+        h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: () => location.reload() }, 'Lock now'),
+          h('button', { class: 'btn ghost', onclick: async () => { if (!confirm('Turn off the lock? Your library will be stored unencrypted on this device.')) return; await setLock(null); render(); } }, 'Turn off'))]
+        : lockSetup(),
       h('h2', {}, 'Library'),
       h('p', { class: 'muted' }, `${state.stories.length} stories, ${state.characters.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
-      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'), file)];
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
+        h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file,
+        h('button', { class: 'btn danger', onclick: eraseAll }, 'Erase everything')),
+      h('p', { class: 'muted' }, 'Backups are encrypted (AES-256) with a key unique to this device. To open one on another device, or after clearing this browser, you also need this device\'s key file: download it once and keep it somewhere separate from your backups.'),
+      ui.pendingImport && unlockBox()];
   },
 };
 
@@ -396,15 +446,43 @@ function characterEditor(c) {
     appearsIn.length > 0 && [h('h2', {}, 'Appears in'), appearsIn.map((s) => h('div', { class: 'card', onclick: () => go('stories', s.id) }, h('h3', {}, s.title), h('p', {}, s.summary || '')))]];
 }
 
+function lockSetup() {
+  const a = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'New passcode (at least 6 characters)' });
+  const b = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Type it again' });
+  const msg = h('div', { class: 'status' });
+  const turnOn = async () => {
+    if (a.value.length < 6) { msg.textContent = 'Use at least 6 characters. Longer is safer.'; return; }
+    if (a.value !== b.value) { msg.textContent = 'The two passcodes don\'t match.'; return; }
+    if (!confirm('If you forget this passcode, your stories cannot be recovered. Keep a backup and your key file somewhere safe. Turn on the lock?')) return;
+    msg.textContent = 'Encrypting…';
+    await setLock(a.value); render();
+  };
+  return [h('p', { class: 'muted' }, 'Encrypt your stories, characters, world and API key on this device with a passcode. Anyone opening the app, or copying the browser\'s files, sees only scrambled data.'),
+    a, b, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: turnOn }, 'Turn on lock')), msg];
+}
+
+// Wipes every trace on this device: library, device key, API key, offline cache. Nothing is kept anywhere else.
+async function eraseAll() {
+  if (!confirm('Erase all stories, characters, your world, your API key and this device\'s backup key? This cannot be undone. Backups made with this device\'s key can only be opened with a key file you downloaded.')) return;
+  await new Promise((res) => { const r = indexedDB.deleteDatabase(DB_KEY); r.onsuccess = r.onerror = r.onblocked = res; });
+  try { localStorage.clear(); sessionStorage.clear(); } catch (e) { /* private mode */ }
+  if (self.caches) for (const k of await caches.keys()) await caches.delete(k);
+  if (navigator.serviceWorker) for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+  location.replace(location.pathname);
+}
+
 // ---------- boot ----------
 (async () => {
-  state = A.normalizeState(await load());
-  let crashed = null;
-  try { crashed = localStorage.getItem(CRASH_KEY); } catch (e) { /* private mode */ }
-  if (crashed) {
-    mark(null);
-    if (state.settings.baseUrl === BUILTIN) ui.status = 'The built-in model crashed the page last time. ' + builtinOutOfMemory(state.settings.model);
-  }
+  const saved = await get('state');
+  if (A.isLocked(saved)) ui.locked = saved; else state = A.normalizeState(saved);
+  // Blur the screen when the app is hidden, so the app switcher preview doesn't show a story. Best effort: browsers decide when they snapshot.
+  // With the lock on, coming back after 5 minutes reloads, which drops the key and the library from memory.
+  let hiddenAt = 0;
+  document.addEventListener('visibilitychange', () => {
+    document.body.classList.toggle('hide', document.hidden);
+    if (document.hidden) hiddenAt = Date.now();
+    else if (lockKey && Date.now() - hiddenAt > 5 * 60e3) location.reload();
+  });
   // Anything that slips past a try/catch still shows up instead of failing silently.
   addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
   render();

@@ -107,14 +107,41 @@ test('relationships written in a character profile reach the story prompt', () =
   assert.doesNotMatch(user.content, /bakery\./);
 });
 
-test('mature setting adds the explicit-content instruction only when on', () => {
+test('mature setting is on by default and adds the explicit-content instruction only when on', () => {
   const s = seeded();
-  assert.doesNotMatch(A.buildStoryMessages(s, { characterIds: ['a'] })[0].content, /adult fiction/);
-  s.settings.mature = true;
   assert.match(A.buildStoryMessages(s, { characterIds: ['a'] })[0].content, /adult fiction/);
+  s.settings.mature = false;
+  assert.doesNotMatch(A.buildStoryMessages(s, { characterIds: ['a'] })[0].content, /adult fiction/);
 });
 
 test('a retired model id saved in settings is swapped for its replacement', () => {
   assert.equal(A.normalizeState({ settings: { model: 'venice/uncensored:free' } }).settings.model, A.emptyState().settings.model);
   assert.equal(A.normalizeState({ settings: { model: 'my/model' } }).settings.model, 'my/model');
+});
+
+test('a saved setup using the removed built-in model falls back to the free default', () => {
+  const s = A.normalizeState({ settings: { baseUrl: 'builtin', model: 'Llama-3.2-1B-Instruct-q4f16_1-MLC' } }).settings;
+  assert.equal(s.baseUrl, A.emptyState().settings.baseUrl);
+  assert.equal(s.model, A.emptyState().settings.model);
+});
+
+test('backups round-trip with the device key and refuse any other key', async () => {
+  const key = A.newKey(), other = A.newKey();
+  const lib = seeded();
+  const file = await A.encryptBackup(lib, key);
+  assert.ok(A.isEncrypted(file));
+  assert.ok(!JSON.stringify(file).includes('Mira'));
+  assert.deepEqual(await A.decryptBackup(JSON.parse(JSON.stringify(file)), key + '\n'), lib);
+  await assert.rejects(A.decryptBackup(file, other));
+  assert.ok(!A.isEncrypted(lib));
+});
+
+test('the app lock seals the library under a passcode and refuses a wrong one', async () => {
+  const salt = A.newSalt();
+  const lib = seeded();
+  const rec = await A.seal(lib, await A.deriveKey('correct horse', salt), salt);
+  assert.ok(A.isLocked(rec) && !A.isLocked(lib));
+  assert.ok(!JSON.stringify(rec).includes('Mira'));
+  assert.deepEqual(await A.unseal(rec, await A.deriveKey('correct horse', rec.salt)), lib);
+  await assert.rejects(A.unseal(rec, await A.deriveKey('wrong horse', rec.salt)));
 });

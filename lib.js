@@ -12,7 +12,9 @@
         model: 'nvidia/nemotron-3-ultra-550b-a55b:free',
         temperature: 0.9,
         style: '',
-        mature: false,
+        mature: true,
+        privateOnly: false,
+        ageOk: false,
       },
       characters: [],
       stories: [],
@@ -22,13 +24,16 @@
 
   // Models that stopped being offered under a saved id; swapped on load so old settings keep working.
   const RETIRED = { 'venice/uncensored:free': 'nvidia/nemotron-3-ultra-550b-a55b:free' };
+  const BUILTIN = 'builtin'; // the removed on-device model; saved setups fall back to the default
 
   // Fill in anything missing so old exports / partial imports still load.
   function normalizeState(s) {
     const base = emptyState();
     s = s || {};
     return {
-      settings: Object.assign(base.settings, s.settings, RETIRED[s.settings && s.settings.model] ? { model: RETIRED[s.settings.model] } : {}),
+      settings: Object.assign(base.settings, s.settings,
+        RETIRED[s.settings && s.settings.model] ? { model: RETIRED[s.settings.model] } : {},
+        s.settings && s.settings.baseUrl === BUILTIN ? { baseUrl: base.settings.baseUrl, model: base.settings.model } : {}),
       characters: Array.isArray(s.characters) ? s.characters : [],
       stories: Array.isArray(s.stories) ? s.stories : [],
       world: Object.assign(base.world, s.world),
@@ -247,7 +252,41 @@
     return { tokens, rest, done };
   }
 
-  const api = { LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships };
+  // ---------- encryption: AES-256-GCM via WebCrypto, so browser and node both run it ----------
+  // Backups use a random per-device key; the app lock uses a key derived from the user's passcode.
+  function toB64(buf) {
+    const u = new Uint8Array(buf);
+    let s = '';
+    for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  const fromB64 = (s) => Uint8Array.from(atob(String(s).trim()), (c) => c.charCodeAt(0));
+  const newKey = () => toB64(crypto.getRandomValues(new Uint8Array(32)));
+  const newSalt = () => toB64(crypto.getRandomValues(new Uint8Array(16)));
+  const cryptoKey = (key) => crypto.subtle.importKey('raw', fromB64(key), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  // OWASP 2023 guidance for PBKDF2-SHA256; about half a second on a phone, so guessing passcodes is slow.
+  const PBKDF2_ITERATIONS = 600000;
+  async function deriveKey(passcode, salt) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passcode), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: fromB64(salt), iterations: PBKDF2_ITERATIONS }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+  async function encryptWith(obj, key) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+    return { iv: toB64(iv), data: toB64(data) };
+  }
+  // Throws on a wrong key: GCM authenticates, so a bad key never yields garbage.
+  async function decryptWith(rec, key) {
+    return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(rec.iv) }, key, fromB64(rec.data))));
+  }
+  const isEncrypted = (f) => !!f && f.aetherstory === 'encrypted-v1';
+  const encryptBackup = async (obj, key) => ({ aetherstory: 'encrypted-v1', alg: 'AES-256-GCM', ...(await encryptWith(obj, await cryptoKey(key))) });
+  const decryptBackup = async (file, key) => decryptWith(file, await cryptoKey(key));
+  const isLocked = (r) => !!r && r.aetherstory === 'locked-v1';
+  const seal = async (obj, key, salt) => ({ aetherstory: 'locked-v1', alg: 'AES-256-GCM, PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt, ...(await encryptWith(obj, key)) });
+  const unseal = decryptWith;
+
+  const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
