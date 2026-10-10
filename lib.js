@@ -13,6 +13,7 @@
         temperature: 0.9,
         style: '',
         mature: true,
+        privateOnly: false,
         ageOk: false,
       },
       characters: [],

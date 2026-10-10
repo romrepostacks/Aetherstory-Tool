@@ -59,9 +59,14 @@ async function chat(messages, { onToken, signal, stream = true } = {}) {
   if (s.apiKey) headers.Authorization = 'Bearer ' + s.apiKey;
   const res = await fetch(s.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
     method: 'POST', headers, signal,
-    body: JSON.stringify({ model: s.model, messages, temperature: Number(s.temperature) || 0.9, stream }),
+    // Private mode: OpenRouter only routes to providers that don't store or train on prompts.
+    body: JSON.stringify({ model: s.model, messages, temperature: Number(s.temperature) || 0.9, stream,
+      ...(s.privateOnly && s.baseUrl.includes('openrouter.ai') ? { provider: { data_collection: 'deny' } } : {}) }),
   });
-  if (!res.ok) throw new Error(`AI request failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    const msg = `AI request failed (${res.status}): ${(await res.text()).slice(0, 300)}`;
+    throw new Error(s.privateOnly && res.status === 404 ? msg + '\nPrivate mode is on and no private provider serves this model. Pick a paid model in Advanced mode, or turn Private mode off.' : msg);
+  }
   if (!stream || !(res.headers.get('content-type') || '').includes('event-stream')) {
     const d = await res.json();
     const text = d.choices[0].message.content;
@@ -298,7 +303,8 @@ const VIEWS = {
     const restore = async (raw) => {
       const data = A.normalizeState(raw);
       if (!confirm(`Replace your library with this backup (${data.stories.length} stories, ${data.characters.length} characters)?`)) return;
-      if (!data.settings.apiKey) data.settings.apiKey = s.apiKey; // backups don't carry the API key
+      // AI settings always stay this device's own: a crafted backup must not redirect this device's key to another server.
+      for (const k of ['baseUrl', 'apiKey', 'model', 'privateOnly']) data.settings[k] = s[k];
       data.settings.ageOk = true;
       state = data; ui.pendingImport = null; await save(); render();
     };
@@ -350,13 +356,16 @@ const VIEWS = {
         h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection'))),
       status,
       h('h2', {}, 'Writing style'),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.privateOnly, onchange: (e) => { s.privateOnly = e.target.checked; save(); }, style: 'width:auto' }), ' Private mode: only use AI providers that do not store or train on my stories'),
+      h('p', { class: 'muted' }, 'Your stories are sent to the AI to be written. Free models are often run by providers that may keep prompts; Private mode blocks those, so free models may stop working.'),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
       h('p', { class: 'muted' }, 'Free models may still soften some scenes. Venice and Euryale (paid, in Advanced mode) follow it most reliably.'),
       ...field('Instructions applied to every story', style),
       h('h2', {}, 'Library'),
       h('p', { class: 'muted' }, `${state.stories.length} stories, ${state.characters.length} characters. Everything lives on this device; export to back up or move it to your phone/PC.`),
       h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: exportLib }, 'Export backup'), h('button', { class: 'btn ghost', onclick: () => file.click() }, 'Import backup'),
-        h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file),
+        h('button', { class: 'btn ghost', onclick: async () => download(await deviceKey(), 'aetherstory-key.txt') }, 'Download key'), file,
+        h('button', { class: 'btn danger', onclick: eraseAll }, 'Erase everything')),
       h('p', { class: 'muted' }, 'Backups are encrypted (AES-256) with a key unique to this device. To open one on another device, or after clearing this browser, you also need this device\'s key file: download it once and keep it somewhere separate from your backups.'),
       ui.pendingImport && unlockBox()];
   },
@@ -411,9 +420,21 @@ function characterEditor(c) {
     appearsIn.length > 0 && [h('h2', {}, 'Appears in'), appearsIn.map((s) => h('div', { class: 'card', onclick: () => go('stories', s.id) }, h('h3', {}, s.title), h('p', {}, s.summary || '')))]];
 }
 
+// Wipes every trace on this device: library, device key, API key, offline cache. Nothing is kept anywhere else.
+async function eraseAll() {
+  if (!confirm('Erase all stories, characters, your world, your API key and this device\'s backup key? This cannot be undone. Backups made with this device\'s key can only be opened with a key file you downloaded.')) return;
+  await new Promise((res) => { const r = indexedDB.deleteDatabase(DB_KEY); r.onsuccess = r.onerror = r.onblocked = res; });
+  try { localStorage.clear(); sessionStorage.clear(); } catch (e) { /* private mode */ }
+  if (self.caches) for (const k of await caches.keys()) await caches.delete(k);
+  if (navigator.serviceWorker) for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+  location.replace(location.pathname);
+}
+
 // ---------- boot ----------
 (async () => {
   state = A.normalizeState(await load());
+  // Blur the screen when the app is hidden, so the app switcher preview doesn't show a story. Best effort: browsers decide when they snapshot.
+  document.addEventListener('visibilitychange', () => document.body.classList.toggle('hide', document.hidden));
   // Anything that slips past a try/catch still shows up instead of failing silently.
   addEventListener('unhandledrejection', (e) => setStatus('Error: ' + ((e.reason && e.reason.message) || e.reason)));
   render();
