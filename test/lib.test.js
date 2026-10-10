@@ -145,3 +145,43 @@ test('the app lock seals the library under a passcode and refuses a wrong one', 
   assert.deepEqual(await A.unseal(rec, await A.deriveKey('correct horse', rec.salt)), lib);
   await assert.rejects(A.unseal(rec, await A.deriveKey('wrong horse', rec.salt)));
 });
+
+test('world revision: previewed changes apply to sheets, world and stories, and undo restores them', () => {
+  const s = seeded();
+  s.characters[0].appearance = 'Black hair.';
+  s.stories[0].text = 'Mira tied back her black hair. The storm came.';
+  const sheets = A.sheetChanges(s, {
+    characters: [{ name: 'mira', appearance: 'Red hair.' }, { name: 'Toren', personality: 'wry' }, { name: 'Nobody', appearance: 'x' }],
+    world: { lore: ['Magic is fading.', 'Mira was born with red hair.'], places: [] },
+    affected: ['Mira'],
+  });
+  assert.deepEqual(sheets.characters, [{ id: 'a', name: 'Mira', set: { appearance: 'Red hair.' } }]);
+  assert.deepEqual(Object.keys(sheets.world), ['lore']);
+  assert.deepEqual(A.storiesForRevision(s, sheets.affected).map((x) => x.id), ['s1']);
+  assert.equal(A.storiesForRevision(s, []).length, 2);
+
+  const { text, applied } = A.applyEdits(s.stories[0].text, [{ find: 'her black hair', replace: 'her red hair' }, { find: 'not in the story', replace: 'x' }, { find: '', replace: 'x' }]);
+  assert.equal(text, 'Mira tied back her red hair. The storm came.');
+  assert.equal(applied.length, 1);
+
+  const plan = Object.assign(sheets, { revision: 'Mira has red hair', stories: [{ id: 's1', text, summary: '', edits: applied }] });
+  A.applyRevision(s, plan);
+  assert.equal(s.characters[0].appearance, 'Red hair.');
+  assert.equal(s.world.lore.length, 2);
+  assert.match(s.stories[0].text, /red hair/);
+  assert.equal(s.stories[0].summary, 'Mira loses her ship.');
+  assert.equal(s.revisions[0].text, 'Mira has red hair');
+
+  A.undoRevision(s);
+  assert.equal(s.characters[0].appearance, 'Black hair.');
+  assert.deepEqual(s.world.lore, ['Magic is fading.']);
+  assert.match(s.stories[0].text, /black hair/);
+  assert.equal(s.revisions.length, 0);
+  assert.equal(A.undoRevision(s), null);
+});
+
+test('revision prompts carry the change and the story text', () => {
+  const s = seeded();
+  assert.match(A.buildReviseSheetMessages(s, 'Mira is left-handed')[1].content, /Lost her ship[\s\S]*Mira is left-handed/);
+  assert.match(A.buildReviseStoryMessages(s.stories[0], 'Mira is left-handed')[1].content, /Old text/);
+});

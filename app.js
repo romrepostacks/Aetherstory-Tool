@@ -113,8 +113,8 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
-const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['settings', '⚙️', 'Settings']];
+const ui = { locked: null, advanced: false, pendingImport: null, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null, reviseText: '', revision: null };
+const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['revise', '🪄', 'Revise'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
 
@@ -172,6 +172,27 @@ async function quickstart(vibe) {
     ui.selected = added.map((c) => c.id);
     await save();
     ui.status = `Created ${state.world.name} with ${added.map((c) => c.name).join(', ')}. Hit Generate.`;
+  } catch (e) { ui.status = e.message; }
+  finish();
+}
+
+// World revision: ask for the sheet changes, then exact-text edits for each story the change touches. Nothing is saved until Apply.
+async function planRevision(revision) {
+  if (!revision || ui.busy) return;
+  ui.busy = true; render(); setStatus('Reading your cast and world…');
+  try {
+    const plan = Object.assign(A.sheetChanges(state, await chatJson(A.buildReviseSheetMessages(state, revision))), { revision, stories: [], failed: [] });
+    const targets = A.storiesForRevision(state, plan.affected);
+    for (const [i, s] of targets.entries()) {
+      setStatus(`Checking story ${i + 1} of ${targets.length}: ${s.title}…`);
+      try {
+        const r = await chatJson(A.buildReviseStoryMessages(s, revision));
+        const { text, applied } = A.applyEdits(s.text, r.edits);
+        const summary = typeof r.summary === 'string' && r.summary.trim() !== (s.summary || '') ? r.summary.trim() : '';
+        if (applied.length || summary) plan.stories.push({ id: s.id, text, summary, edits: applied });
+      } catch (e) { plan.failed.push(s.title); }
+    }
+    ui.revision = plan; ui.status = '';
   } catch (e) { ui.status = e.message; }
   finish();
 }
@@ -307,6 +328,42 @@ const VIEWS = {
       h('p', { class: 'muted' }, 'This is the series bible. It grows automatically after every story, and every new story reads it. Edit freely.'),
       ...field('Name', name), ...field('Overview', overview),
       ...listBox('lore', 'Lore'), ...listBox('places', 'Places'), ...listBox('relationships', 'Relationships'), ...listBox('timeline', 'Timeline')];
+  },
+
+  revise() {
+    const plan = ui.revision;
+    const nodes = [h('h2', {}, 'World revision'),
+      h('p', { class: 'muted' }, 'Change a fact in plain words. The AI updates every character, the world notes and every saved story to match, and future stories follow it. You see every change before anything is saved.')];
+    if (!plan) {
+      const box = h('textarea', { placeholder: 'e.g. "Ana has always had red hair, not black" or "The castle burned down last winter"', oninput: (e) => { ui.reviseText = e.target.value; } });
+      box.value = ui.reviseText;
+      nodes.push(box, h('div', { class: 'row' }, h('button', { class: 'btn', disabled: ui.busy, onclick: () => planRevision(ui.reviseText.trim()) }, '🔍 Preview changes')));
+    } else {
+      const diff = (label, from, to) => h('div', { class: 'card setup' }, h('h3', {}, label),
+        h('p', { class: 'old' }, Array.isArray(from) ? from.join('\n') : from || '(empty)'), h('p', { class: 'new' }, Array.isArray(to) ? to.join('\n') : to));
+      const char = (id) => state.characters.find((c) => c.id === id) || {};
+      const story = (id) => state.stories.find((s) => s.id === id) || {};
+      const count = plan.characters.length + Object.keys(plan.world).length + plan.stories.length;
+      nodes.push(h('p', {}, h('b', {}, `“${plan.revision}”`)),
+        count ? h('p', { class: 'muted' }, 'Red is what goes, green is what replaces it.') : h('div', { class: 'empty' }, 'Nothing in your library contradicts this. Try wording it differently.'),
+        plan.characters.map((pc) => Object.entries(pc.set).map(([k, v]) => diff(`${pc.name}: ${k}`, char(pc.id)[k], v))),
+        Object.entries(plan.world).map(([k, v]) => diff(`World: ${k}`, state.world[k], v)),
+        plan.stories.map((ps) => [ps.edits.map((e) => diff(`Story: ${story(ps.id).title}`, e.find, e.replace)),
+          ps.summary && diff(`Story: ${story(ps.id).title} (summary)`, story(ps.id).summary, ps.summary)]),
+        plan.failed.length > 0 && h('p', { class: 'muted' }, `Could not check: ${plan.failed.join(', ')}. Those stories stay as they are.`),
+        h('div', { class: 'row' },
+          count > 0 && h('button', { class: 'btn', onclick: async () => { A.applyRevision(state, plan); ui.revision = null; ui.reviseText = ''; await save(); ui.status = 'Revision applied.'; render(); } }, `Apply ${count} change${count > 1 ? 's' : ''}`),
+          h('button', { class: 'btn ghost', onclick: () => { ui.revision = null; ui.status = ''; render(); } }, 'Discard')));
+    }
+    nodes.push(h('div', { class: 'status', id: 'status' }, ui.status));
+    if (state.revisions.length) {
+      nodes.push(h('h2', {}, 'Past revisions'), state.revisions.map((r, i) => h('div', { class: 'card setup' }, h('h3', {}, r.text), h('p', {}, fmtDate(r.at)),
+        i === 0 && !plan && h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: async () => {
+          if (!confirm('Undo this revision? Characters, world notes and stories go back to how they were before it.')) return;
+          A.undoRevision(state); await save(); ui.status = 'Revision undone.'; render();
+        } }, 'Undo')))));
+    }
+    return nodes;
   },
 
   settings() {

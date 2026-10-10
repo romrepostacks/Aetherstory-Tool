@@ -19,6 +19,7 @@
       characters: [],
       stories: [],
       world: { name: 'My World', overview: '', lore: [], places: [], relationships: [], timeline: [] },
+      revisions: [],
     };
   }
 
@@ -37,6 +38,7 @@
       characters: Array.isArray(s.characters) ? s.characters : [],
       stories: Array.isArray(s.stories) ? s.stories : [],
       world: Object.assign(base.world, s.world),
+      revisions: Array.isArray(s.revisions) ? s.revisions : [],
     };
   }
 
@@ -232,6 +234,109 @@
     return changes;
   }
 
+  // ---------- world revision: one plain-words change, applied to the cast, the bible and every saved story ----------
+  const SHEET = ['appearance', 'personality', 'background'];
+  const WORLD_LISTS = ['lore', 'places', 'relationships', 'timeline'];
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const copy = (v) => JSON.parse(JSON.stringify(v));
+
+  function buildReviseSheetMessages(state, revision) {
+    const system = 'You maintain the continuity bible for a fiction series. The author has changed a fact. Reply with JSON only, no markdown.';
+    const chars = state.characters.map((c) => JSON.stringify({ name: c.name, appearance: c.appearance || '', personality: c.personality || '', background: c.background || '', developments: c.developments || [] })).join('\n');
+    const w = state.world;
+    const user = `Characters:\n${chars || '(none)'}\n\nWorld:\n${JSON.stringify({ overview: w.overview, lore: w.lore, places: w.places, relationships: w.relationships, timeline: w.timeline })}\n\n` +
+      `The author's change, which is now true and always was: "${revision}"\n\n` +
+      'Rewrite only what contradicts the change, and add the change where it belongs so future stories follow it. Return JSON:\n' +
+      '{"characters": [{"name": "exact existing name", "appearance": "", "personality": "", "background": "", "developments": ["full list"]}],\n' +
+      ' "world": {"overview": "", "lore": ["full list"], "places": ["full list"], "relationships": ["full list"], "timeline": ["full list"]},\n' +
+      ' "affected": ["names of every character the change is about"]}\n' +
+      'Include only the fields that change, each with its complete new value, and leave every other field out. A list you return replaces the old one, so keep its other items exactly as they were.';
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+  }
+
+  function buildReviseStoryMessages(story, revision) {
+    const system = 'You are a continuity editor for a fiction series. The author has changed a fact. Reply with JSON only, no markdown.';
+    const user = `The author's change, which is now true and always was: "${revision}"\n\nStory "${story.title}":\n"""${story.text}"""\n\nSummary: ${story.summary || '(none)'}\n\n` +
+      'Find every passage that contradicts the change and rewrite it so the story agrees, changing as little as possible and keeping the style. Return JSON:\n' +
+      '{"edits": [{"find": "exact text copied from the story, long enough to be unique", "replace": "the corrected text"}], "summary": "corrected summary, or empty if it needs no change"}\n' +
+      'Use an empty edits list if nothing in the story contradicts the change.';
+    return [{ role: 'system', content: system }, { role: 'user', content: user }];
+  }
+
+  // Applies exact-text edits. An edit whose text isn't in the story is skipped, so a misquote can't garble it.
+  function applyEdits(text, edits) {
+    const applied = [];
+    for (const e of Array.isArray(edits) ? edits : []) {
+      const find = e && typeof e.find === 'string' ? e.find : '';
+      if (!find.trim() || typeof e.replace !== 'string' || !text.includes(find)) continue;
+      text = text.split(find).join(e.replace);
+      applied.push({ find, replace: e.replace });
+    }
+    return { text, applied };
+  }
+
+  // The model's sheet reply as a plan: only real changes to existing characters and world fields.
+  function sheetChanges(state, r) {
+    r = r || {};
+    const characters = [];
+    for (const rc of Array.isArray(r.characters) ? r.characters : []) {
+      const c = rc && state.characters.find((x) => x.name.toLowerCase() === str(rc.name).toLowerCase());
+      if (!c) continue;
+      const set = {};
+      for (const k of SHEET) if (str(rc[k]) && str(rc[k]) !== (c[k] || '')) set[k] = str(rc[k]);
+      if (Array.isArray(rc.developments) && !same(strList(rc.developments), c.developments || [])) set.developments = strList(rc.developments);
+      if (Object.keys(set).length) characters.push({ id: c.id, name: c.name, set });
+    }
+    const world = {};
+    const rw = r.world && typeof r.world === 'object' ? r.world : {};
+    if (str(rw.overview) && str(rw.overview) !== state.world.overview) world.overview = str(rw.overview);
+    for (const k of WORLD_LISTS) if (Array.isArray(rw[k]) && !same(strList(rw[k]), state.world[k])) world[k] = strList(rw[k]);
+    return { characters, world, affected: strList(r.affected).concat(characters.map((c) => c.name)) };
+  }
+
+  // Stories to check: those featuring or naming an affected character, or every story when the change isn't about anyone.
+  function storiesForRevision(state, affected) {
+    const people = state.characters.filter((c) => affected.some((n) => n.toLowerCase() === c.name.toLowerCase()));
+    if (!people.length) return state.stories.slice();
+    const named = (s, c) => new RegExp(`\\b${c.name.split(' ')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(s.text || '');
+    return state.stories.filter((s) => people.some((c) => (s.characterIds || []).includes(c.id) || named(s, c)));
+  }
+
+  // Mutates state with a reviewed plan and keeps what it replaced, so undoRevision can put it back.
+  function applyRevision(state, plan) {
+    const before = { characters: {}, world: {}, stories: {} };
+    for (const pc of plan.characters) {
+      const c = state.characters.find((x) => x.id === pc.id);
+      if (!c) continue;
+      before.characters[c.id] = {};
+      for (const k of Object.keys(pc.set)) before.characters[c.id][k] = c[k] === undefined ? (k === 'developments' ? [] : '') : copy(c[k]);
+      Object.assign(c, copy(pc.set));
+    }
+    for (const k of Object.keys(plan.world)) { before.world[k] = copy(state.world[k]); state.world[k] = copy(plan.world[k]); }
+    for (const ps of plan.stories) {
+      const s = state.stories.find((x) => x.id === ps.id);
+      if (!s) continue;
+      before.stories[s.id] = { text: s.text, summary: s.summary || '' };
+      s.text = ps.text;
+      if (ps.summary) s.summary = ps.summary;
+    }
+    const rec = { id: uid(), text: plan.revision, at: Date.now(), before };
+    // ponytail: undo keeps the old text of every edited story, so only the last 5 revisions are kept.
+    state.revisions = [rec].concat(state.revisions || []).slice(0, 5);
+    return rec;
+  }
+
+  // Puts back what the most recent revision changed.
+  function undoRevision(state) {
+    const rec = (state.revisions || [])[0];
+    if (!rec) return null;
+    for (const [id, fields] of Object.entries(rec.before.characters)) Object.assign(state.characters.find((c) => c.id === id) || {}, fields);
+    Object.assign(state.world, rec.before.world);
+    for (const [id, old] of Object.entries(rec.before.stories)) Object.assign(state.stories.find((s) => s.id === id) || {}, old);
+    state.revisions = state.revisions.slice(1);
+    return rec;
+  }
+
   // Split an SSE buffer into complete `data:` payloads plus the unfinished tail.
   function parseSSE(buffer) {
     const lines = buffer.split('\n');
@@ -286,7 +391,8 @@
   const seal = async (obj, key, salt) => ({ aetherstory: 'locked-v1', alg: 'AES-256-GCM, PBKDF2-SHA256', iterations: PBKDF2_ITERATIONS, salt, ...(await encryptWith(obj, key)) });
   const unseal = decryptWith;
 
-  const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships };
+  const api = { newKey, newSalt, deriveKey, seal, unseal, isLocked, isEncrypted, encryptBackup, decryptBackup, LENGTHS, uid, emptyState, normalizeState, buildStoryMessages, buildWorldUpdateMessages, buildCharacterMessages, buildQuickstartMessages, applyQuickstart, parseJsonLoose, applyWorldUpdate, parseSSE, describeWorld, currentRelationships,
+    buildReviseSheetMessages, buildReviseStoryMessages, applyEdits, sheetChanges, storiesForRevision, applyRevision, undoRevision };
   root.Aether = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
