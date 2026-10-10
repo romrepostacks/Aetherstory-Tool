@@ -56,7 +56,17 @@ async function setLock(passcode) {
 }
 
 // ---------- AI ----------
-async function chat(messages, { onToken, signal, stream = true } = {}) {
+// Free models are often busy or rate limited: retry a couple of times before giving up, unless text already streamed in.
+async function chat(messages, opts = {}) {
+  for (let attempt = 0; ; attempt++) {
+    let got = false;
+    try { return await chatOnce(messages, { ...opts, onToken: opts.onToken && ((t) => { got = true; opts.onToken(t); }) }); } catch (e) {
+      if (!e.retry || got || attempt >= 2 || (opts.signal && opts.signal.aborted)) throw e;
+      await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)));
+    }
+  }
+}
+async function chatOnce(messages, { onToken, signal, stream = true } = {}) {
   const s = state.settings;
   if (!s.baseUrl || !s.model) throw new Error('Set an AI provider and model in Settings first.');
   const headers = { 'Content-Type': 'application/json' };
@@ -69,11 +79,13 @@ async function chat(messages, { onToken, signal, stream = true } = {}) {
   });
   if (!res.ok) {
     const msg = `AI request failed (${res.status}): ${(await res.text()).slice(0, 300)}`;
-    throw new Error(s.privateOnly && res.status === 404 ? msg + '\nPrivate mode is on and no private provider serves this model. Pick a paid model in Advanced mode, or turn Private mode off.' : msg);
+    const err = new Error(s.privateOnly && res.status === 404 ? msg + '\nPrivate mode is on and no private provider serves this model. Pick a paid model in Advanced mode, or turn Private mode off.' : msg);
+    err.retry = res.status === 429 || res.status >= 500;
+    throw err;
   }
   if (!stream || !(res.headers.get('content-type') || '').includes('event-stream')) {
     const d = await res.json();
-    const text = d.choices[0].message.content;
+    const text = A.replyText(d);
     if (onToken) onToken(text);
     return text;
   }
@@ -85,6 +97,7 @@ async function chat(messages, { onToken, signal, stream = true } = {}) {
     if (done) break;
     const out = A.parseSSE(buf + dec.decode(value, { stream: true }));
     buf = out.rest;
+    if (out.error) throw out.error;
     for (const t of out.tokens) { full += t; onToken && onToken(t); }
     if (out.done) break;
   }

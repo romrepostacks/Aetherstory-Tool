@@ -185,3 +185,11 @@ test('revision prompts carry the change and the story text', () => {
   assert.match(A.buildReviseSheetMessages(s, 'Mira is left-handed')[1].content, /Lost her ship[\s\S]*Mira is left-handed/);
   assert.match(A.buildReviseStoryMessages(s.stories[0], 'Mira is left-handed')[1].content, /Old text/);
 });
+
+test('provider errors sent instead of a reply become readable, retryable errors', () => {
+  assert.equal(A.replyText({ choices: [{ message: { content: 'hi' } }] }), 'hi');
+  assert.throws(() => A.replyText({ error: { code: 429, message: 'Rate limit exceeded' } }), (e) => /Rate limit exceeded/.test(e.message) && e.retry);
+  assert.throws(() => A.replyText({ error: { code: 400, message: 'bad' } }), (e) => !e.retry);
+  assert.throws(() => A.replyText({}), /empty reply/);
+  assert.match(A.parseSSE('data: {"error":{"code":502,"message":"Provider down"}}\n').error.message, /Provider down/);
+});
