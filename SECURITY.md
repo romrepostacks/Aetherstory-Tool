@@ -42,7 +42,7 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 
 | # | Severity | Finding | Status |
 |---|---|---|---|
-| 1 | High | Story text goes to the AI provider, and free providers may keep or train on it. | **Partly fixed:** Private mode added. Whether it is on by default is waiting on the owner. |
+| 1 | High | Story text goes to the AI provider, and free providers may keep or train on it. | **Mitigated:** Private mode added as an opt-in switch. The owner chose on 2026-10-10 to keep it off by default so the free model keeps working. |
 | 2 | High | The library and API key are stored unencrypted on the device. Anyone who can open the browser, or copy its profile, can read every story. | **Open:** app lock (see Roadmap). |
 | 3 | High | The repository is public. An earlier PR description once contained real character details. It was redacted, but GitHub keeps description edit history, and commits that were overwritten stay reachable by their ID. | **Owner action needed:** see the owner checklist below. A check of the current files, every commit on every branch, and all PR descriptions and comments found no personal details today. |
 | 4 | High | Supply chain: anyone who can push to `main` ships code to every user's device on the next load, and that code could read the library. | **Owner action needed:** 2FA and branch protection. Workflow actions are pinned to major tags rather than commit SHAs. |
