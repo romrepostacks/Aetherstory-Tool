@@ -13,6 +13,7 @@ This file is the living record of how the app protects its users. **Every change
 | Device backup key (AES-256) | Its own IndexedDB record, outside the library | Never written into backups. Downloaded only when the user taps *Download key*. Sealed under the passcode when App lock is on. |
 | App lock passcode and derived key | Nowhere. The key lives only in memory while the app is unlocked. | Only a random salt is stored. |
 | Backup files | Wherever the user saves them | AES-256-GCM with the device key. Tampering or a wrong key is detected and refused. |
+| World revision undo history | In the library record, so it is sealed by App lock and included in backups like everything else | Keeps the replaced text of edited stories and sheets for the last 5 revisions, so the user can undo. Erase everything removes it. |
 | Age confirmation | In the library settings | Not sensitive. |
 
 There is no server, account system, analytics, telemetry, crash reporting or third-party script. The app is static files on GitHub Pages.
@@ -22,8 +23,9 @@ There is no server, account system, analytics, telemetry, crash reporting or thi
 1. **Story requests to the AI provider the user picks** (OpenRouter by default). The prompt contains the selected characters' profiles, the world notes and the story so far. This is the one unavoidable flow: the AI cannot write without reading. Who can see it:
    - **OpenRouter** relays it. Users should keep prompt logging off in their OpenRouter privacy settings.
    - **The model's provider** runs it. Free models are often served by providers that may keep or train on prompts, which is why OpenRouter makes free models a separate opt-in in its privacy settings. **Private mode** (Settings) adds `provider.data_collection = "deny"`, so OpenRouter only routes to providers that don't store or train on prompts. Some free models stop working when it's on.
-2. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
-3. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
+2. **World revisions** (Revise tab) send the revision text, every character sheet and the world notes, then each story that mentions an affected character, in full, to the same AI provider. A story already goes there when it is written or continued, so no new party sees it, but one revision can resend many stories at once. The app shows every change before saving and applies nothing the user hasn't confirmed; edits that don't match the story's exact text are dropped.
+3. **Loading the app** from GitHub Pages. GitHub sees the visitor's IP address like any web host. No story data is involved.
+4. Nothing else. The Content Security Policy blocks scripts from anywhere but the app itself.
 
 ## Protections in place
 
