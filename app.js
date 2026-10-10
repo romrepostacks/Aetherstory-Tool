@@ -147,7 +147,7 @@ const charName = (id) => (state.characters.find((c) => c.id === id) || {}).name;
 
 // ---------- app state & routing ----------
 let state = A.emptyState();
-const ui = { view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
+const ui = { advanced: false, view: 'write', param: null, selected: [], premise: '', length: 'medium', pov: '', busy: false, status: '', currentId: null, abort: null };
 const TABS = [['write', '✍️', 'Write'], ['stories', '📚', 'Stories'], ['characters', '🎭', 'Cast'], ['world', '🌍', 'World'], ['settings', '⚙️', 'Settings']];
 
 function go(view, param = null) { ui.view = view; ui.param = param; render(); window.scrollTo(0, 0); }
@@ -218,17 +218,23 @@ const PRESETS = {
   'OpenRouter: GPT-4o mini': ['https://openrouter.ai/api/v1', 'openai/gpt-4o-mini'], 'OpenAI': ['https://api.openai.com/v1', 'gpt-4o-mini'],
   'Ollama (this PC)': ['http://localhost:11434/v1', 'llama3.1'], 'LM Studio (this PC)': ['http://localhost:1234/v1', 'local-model'],
 };
+// Phones get the lighter model by default: the 3B one needs ~3GB of GPU memory.
+const builtinModel = () => (/Mobi|Android|iPhone|iPad/.test(navigator.userAgent) ? LIGHT_MODEL : PRESETS['Built-in (this device)'][1]);
+// The plain-language picker on Settings; everything else lives under Advanced.
+const CHOICES = [
+  ['Free (recommended)', 'Good stories at no cost. Needs a free OpenRouter key.', PRESETS['OpenRouter: Nemotron 3 Ultra (free)']],
+  ['Best quality', 'Richest writing and follows the 18+ setting reliably. About a cent per story on OpenRouter.', PRESETS['OpenRouter: Euryale 70B (paid, best)']],
+  ['No account', 'Runs on this device, works offline. One-time 1–2GB download; simpler stories.', [BUILTIN]],
+];
 const VIEWS = {
   write() {
     const story = ui.currentId && state.stories.find((s) => s.id === ui.currentId);
     const nodes = [];
     if (!state.settings.apiKey && state.settings.baseUrl !== BUILTIN && !/localhost|127\.0\.0\.1/.test(state.settings.baseUrl)) {
-      // Phones get the lighter model by default: the 3B one needs ~3GB of GPU memory.
-      const phone = /Mobi|Android|iPhone|iPad/.test(navigator.userAgent);
-      const useBuiltin = () => { Object.assign(state.settings, { baseUrl: BUILTIN, model: phone ? LIGHT_MODEL : PRESETS['Built-in (this device)'][1] }); save(); render(); };
+      const useBuiltin = () => { Object.assign(state.settings, { baseUrl: BUILTIN, model: builtinModel() }); save(); render(); };
       nodes.push(h('div', { class: 'card' }, h('h3', {}, 'First, connect an AI'),
-        h('p', {}, 'Run a free storytelling model right on this device (one-time 1–2GB download), or add an API key in Settings.'),
-        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: useBuiltin }, 'Use built-in model'), h('button', { class: 'btn ghost', onclick: () => go('settings') }, 'Add API key'))));
+        h('p', {}, 'Run a free storytelling model right on this device (one-time 1–2GB download), or use a free online AI (needs a free sign-up).'),
+        h('div', { class: 'row' }, h('button', { class: 'btn', onclick: useBuiltin }, 'Use built-in model'), h('button', { class: 'btn ghost', onclick: () => go('settings') }, 'Set up free online AI'))));
     }
     if (!state.characters.length) {
       const vibe = h('input', { placeholder: 'Optional: a one-line vibe, e.g. "rival witches in a rainy port city"' });
@@ -332,11 +338,20 @@ const VIEWS = {
     };
     const style = h('textarea', { placeholder: 'e.g. slow-burn romance, second person, lots of banter, avoid gore' });
     bind('style', style);
-    return [h('h2', {}, 'AI provider'),
-      h('p', { class: 'muted' }, 'Any OpenAI-compatible API works. Your key is stored only on this device. Built-in presets run the AI on this device instead: no key, works offline after a one-time download, needs a browser with WebGPU.'),
-      ...field('Preset', preset), ...field('Base URL', base), ...field('API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'sk-…' }))),
-      ...field('Model', model), ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 }))),
-      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test connection')), status,
+    const isOn = ([url, id]) => s.baseUrl === url && (url === BUILTIN || s.model === id);
+    const choose = ([url, id]) => { s.baseUrl = url; s.model = url === BUILTIN ? builtinModel() : id; save(); render(); };
+    const openrouter = s.baseUrl.includes('openrouter.ai');
+    return [h('h2', {}, 'Which AI writes your stories?'),
+      CHOICES.map(([title, blurb, p]) => h('div', { class: 'card' + (isOn(p) ? ' on' : ''), onclick: () => choose(p) }, h('h3', {}, (isOn(p) ? '✓ ' : '') + title), h('p', {}, blurb))),
+      !CHOICES.some(([, , p]) => isOn(p)) && h('p', { class: 'muted' }, `Using a custom setup (${s.model}). See Advanced.`),
+      s.baseUrl !== BUILTIN && [
+        ...field(openrouter ? 'OpenRouter key' : 'API key', bind('apiKey', h('input', { type: 'password', autocomplete: 'off', placeholder: 'Paste your key here' }))),
+        openrouter && h('p', { class: 'muted' }, 'No key yet? Sign up free at ', h('a', { href: 'https://openrouter.ai/keys', target: '_blank', rel: 'noopener' }, 'openrouter.ai/keys'), ', tap Create Key, and paste it above. It stays on this device.')],
+      h('div', { class: 'row' }, h('button', { class: 'btn ghost', onclick: test }, 'Test it')), status,
+      h('details', { open: ui.advanced, ontoggle: (e) => { ui.advanced = e.target.open; } }, h('summary', {}, 'Advanced'),
+        h('p', { class: 'muted' }, 'Any OpenAI-compatible API works. Built-in presets run the AI on this device and need a browser with WebGPU.'),
+        ...field('Preset', preset), ...field('Base URL', base), ...field('Model', model),
+        ...field('Creativity (temperature 0–2)', bind('temperature', h('input', { type: 'number', min: 0, max: 2, step: 0.1 })))),
       h('h2', {}, 'Writing style'),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: !!s.mature, onchange: (e) => { s.mature = e.target.checked; save(); }, style: 'width:auto' }), ' Mature content (18+): explicit scenes allowed'),
       h('p', { class: 'muted' }, 'Hosted models like GPT-4o mini and the small built-in models often stay tame anyway; free models may also soften scenes. Venice and Euryale (paid) follow it reliably.'),
